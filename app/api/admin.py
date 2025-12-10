@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from typing import Dict, Any, List
-from app.api.db import DBClient
+from app.api.components.knowledge_manager import KnowledgeManager
 import logging
 
 app = FastAPI()
@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 @app.delete("/api/v1/service-catalog/reset")
 async def reset_catalog():
-    repo = DBClient()
-    if repo.truncate_service_catalog():
-         # Also reset Qdrant if possible, but for now just DB
-         return {"status": "success", "message": "Service catalog reset."}
-    raise HTTPException(status_code=500, detail="Failed to reset catalog")
+    km = KnowledgeManager()
+    result = km.reset_knowledge_base()
+    if result["status"] == "success":
+         return result
+    raise HTTPException(status_code=500, detail=result.get("message", "Failed to reset catalog"))
 
 @app.post("/api/v1/service-catalog/import")
 async def import_catalog(request: Request):
@@ -24,14 +24,13 @@ async def import_catalog(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    # Minimal implementation to prevent crash
-    repo = DBClient()
-    repo.create_service_catalog_table()
+    if not isinstance(data, list):
+         raise HTTPException(status_code=400, detail="Expected a list of catalog entries")
 
-    count = 0
-    if isinstance(data, list):
-        for item in data:
-            repo.insert_service_catalog_entry(item)
-            count += 1
+    km = KnowledgeManager()
+    result = km.import_catalog(data)
 
-    return {"status": "success", "imported_count": count}
+    if result.get("status") == "partial_failure":
+        return result # Return partial success with details
+
+    return result
