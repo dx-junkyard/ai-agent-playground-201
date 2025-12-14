@@ -14,6 +14,7 @@ from app.api.db import DBClient
 from app.api.state_manager import StateManager
 from app.api.components.knowledge_manager import KnowledgeManager
 from pydantic import BaseModel, Field, HttpUrl
+import requests
 
 app = FastAPI()
 
@@ -26,6 +27,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# クラス定義を追加
+class LineAuthRequest(BaseModel):
+    code: str
+    redirect_uri: str
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
@@ -281,6 +287,53 @@ async def get_user_messages(user_id: str = Query(..., description="ユーザーI
     repo = DBClient()
     messages = repo.get_user_messages(user_id=user_id, limit=limit)
     return messages
+
+# 以下のエンドポイントを追加してください
+@app.post("/api/v1/auth/line")
+async def line_auth(request: LineAuthRequest):
+    # 環境変数からシークレットを取得
+    channel_id = os.environ.get("LINE_CHANNEL_ID")
+    channel_secret = os.environ.get("LINE_CHANNEL_SECRET")
+    
+    if not channel_id or not channel_secret:
+        raise HTTPException(status_code=500, detail="Server configuration error: LINE secrets not set")
+
+    # 1. アクセストークンの取得
+    token_url = "https://api.line.me/oauth2/v2.1/token"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "grant_type": "authorization_code",
+        "code": request.code,
+        "redirect_uri": request.redirect_uri, # 拡張機能から送られてきたURIを使用
+        "client_id": channel_id,
+        "client_secret": channel_secret
+    }
+    
+    try:
+        response = requests.post(token_url, headers=headers, data=data)
+        response.raise_for_status()
+        tokens = response.json()
+    except Exception as e:
+        logger.error(f"LINE Token Exchange Failed: {e}, Response: {response.text}")
+        raise HTTPException(status_code=400, detail="Failed to exchange token with LINE")
+
+    # 2. プロフィール情報の取得 (またはIDトークンの検証)
+    # ここでは簡単のためアクセストークンを使ってプロフィールを取得します
+    profile_url = "https://api.line.me/v2/profile"
+    try:
+        profile_resp = requests.get(profile_url, headers={"Authorization": f"Bearer {tokens['access_token']}"})
+        profile_resp.raise_for_status()
+        profile = profile_resp.json()
+        line_user_id = profile.get("userId")
+    except Exception as e:
+         logger.error(f"LINE Profile Fetch Failed: {e}")
+         raise HTTPException(status_code=400, detail="Failed to fetch user profile")
+
+    # 3. ユーザーの作成または取得
+    repo = DBClient()
+    user_id = repo.create_user(line_user_id=line_user_id)
+    
+    return {"user_id": user_id, "line_user_id": line_user_id}
 
 
 
