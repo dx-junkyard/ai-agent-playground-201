@@ -184,7 +184,8 @@ class WorkflowManager:
                     )
         return {
             "interest_profile": updated_context["interest_profile"],
-            "active_hypotheses": updated_context["active_hypotheses"]
+            "active_hypotheses": updated_context["active_hypotheses"],
+            "conversation_summary": updated_context.get("conversation_summary", "")
         }
 
     def _hypothesis_generation_node(self, state: GraphState) -> Dict[str, Any]:

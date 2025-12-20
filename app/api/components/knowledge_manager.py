@@ -44,15 +44,14 @@ class KnowledgeManager:
             if not self.qdrant_client.collection_exists(self.collection_name):
                 return False
 
-            results = self.qdrant_client.search(
+            results = self.qdrant_client.query_points(
                 collection_name=self.collection_name,
-                query_vector=vector,
-                limit=1,
-                with_payload=False # Payload not needed for score check
+                query=vector,
+                limit=1
             )
             
-            # Check if top match exceeds threshold
-            if results and results[0].score >= threshold:
+            # query_points returns a QueryResponse object, access points via .points
+            if results.points and results.points[0].score >= threshold:
                 return True
             
         except Exception as e:

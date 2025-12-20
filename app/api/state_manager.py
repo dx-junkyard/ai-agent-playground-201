@@ -9,6 +9,7 @@ class StateManager:
         "context": {
             "current_page": None, # URL or title of the page they are looking at
             "browsing_history_summary": None,
+            "conversation_summary": "",
         },
         "intent": {
             "goal": None, # What they are trying to achieve
