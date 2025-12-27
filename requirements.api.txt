@@ -10,3 +10,5 @@ langchain-core
 qdrant-client
 python-multipart
 
+celery
+redis
