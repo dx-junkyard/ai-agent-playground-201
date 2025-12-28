@@ -10,6 +10,9 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
       - DB_HOST=db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -27,6 +30,9 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
       - DB_HOST=db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
@@ -78,6 +84,9 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
       - DB_HOST=db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
@@ -86,4 +95,13 @@ services:
       - redis
       - db
       - qdrant
+      - neo4j
     command: celery -A app.core.celery_app worker --loglevel=info
+
+  neo4j:
+    image: neo4j:latest
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/password
