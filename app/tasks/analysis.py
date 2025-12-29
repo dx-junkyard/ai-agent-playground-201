@@ -13,6 +13,7 @@ from app.api.ai_client import AIClient
 from app.api.db import DBClient
 from app.api.state_manager import StateManager
 from app.api.components.knowledge_manager import KnowledgeManager
+from app.api.components.topic_client import TopicClient
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,18 @@ def run_workflow_task(user_id: str, message: str, user_message_id: Optional[str]
         # 4. Run Workflow
         final_state = workflow_manager.invoke(initial_state)
         bot_message = final_state.get("bot_message", "申し訳ありません、エラーが発生しました。")
+
+        # --- Topic Service Integration ---
+        try:
+            topic_client = TopicClient()
+            predicted_category = topic_client.predict_category(message)
+            if predicted_category:
+                logger.info(f"Topic Service predicted: {predicted_category}")
+                # Override or fallback the category
+                final_state["interest_profile"]["current_category"] = predicted_category
+        except Exception as e:
+            logger.warning(f"Topic prediction failed: {e}")
+        # ---------------------------------
 
         # 5. Save Results
 
@@ -257,11 +270,22 @@ def process_capture_task(payload: Dict[str, Any]):
             if visibility == "public":
                 knowledge_manager.add_shared_fact(summary, "webhook_capture", meta)
             else:
+                # --- Topic Service Integration for Capture ---
+                category_for_memory = "CapturedInterest"
+                try:
+                    topic_client = TopicClient()
+                    pred = topic_client.predict_category(content[:500]) # Use first 500 chars
+                    if pred:
+                        category_for_memory = pred
+                except:
+                    pass
+                # ---------------------------------------------
+
                 knowledge_manager.add_user_memory(
                     user_id=user_id,
                     content=summary,
                     memory_type="user_hypothesis",
-                    category="CapturedInterest",
+                    category=category_for_memory,
                     meta=meta
                 )
 
