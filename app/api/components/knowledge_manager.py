@@ -8,6 +8,7 @@ from qdrant_client.models import PointStruct, VectorParams, Distance, ScoredPoin
 
 from app.api.db import DBClient
 from app.api.ai_client import AIClient
+from app.api.components.graph_manager import GraphManager
 from config import EMBEDDING_DIMENSION
 
 class KnowledgeManager:
@@ -19,6 +20,7 @@ class KnowledgeManager:
     def __init__(self):
         self.db_client = DBClient()
         self.ai_client = AIClient()
+        self.graph_manager = GraphManager()
 
         self.qdrant_host = os.getenv("QDRANT_HOST", "localhost")
         self.qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
@@ -44,15 +46,14 @@ class KnowledgeManager:
             if not self.qdrant_client.collection_exists(self.collection_name):
                 return False
 
-            results = self.qdrant_client.search(
+            results = self.qdrant_client.query_points(
                 collection_name=self.collection_name,
-                query_vector=vector,
-                limit=1,
-                with_payload=False # Payload not needed for score check
+                query=vector,
+                limit=1
             )
             
-            # Check if top match exceeds threshold
-            if results and results[0].score >= threshold:
+            # query_points returns a QueryResponse object, access points via .points
+            if results.points and results.points[0].score >= threshold:
                 return True
             
         except Exception as e:
@@ -69,7 +70,7 @@ class KnowledgeManager:
                 vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
             )
 
-    def add_user_memory(self, user_id: str, content: str, memory_type: str = "user_hypothesis", meta: Dict[str, Any] = None) -> bool:
+    def add_user_memory(self, user_id: str, content: str, memory_type: str = "user_hypothesis", category: str = "General", meta: Dict[str, Any] = None) -> bool:
         """
         L1/L2: Save private user memory or AI insight.
         """
@@ -84,6 +85,7 @@ class KnowledgeManager:
 
         payload = {
             "user_id": user_id,
+            "category": category,
             "type": memory_type,
             "visibility": "private",
             "content": content,
@@ -100,9 +102,35 @@ class KnowledgeManager:
                     payload=payload
                 )]
             )
+
+            # Sync to Knowledge Graph if applicable
+            # Treat category as a Concept if valid
+            if category and category != "General":
+                source_type = self.graph_manager.SOURCE_AI_INFERRED
+                if memory_type == "user_stated":
+                    source_type = self.graph_manager.SOURCE_USER_STATED
+
+                self.graph_manager.add_user_interest(
+                    user_id=user_id,
+                    concept_name=category,
+                    confidence=0.8,
+                    source_type=source_type
+                )
+
+                # If memory is a hypothesis, add it
+                if memory_type == "user_hypothesis":
+                    self.graph_manager.add_hypothesis(text=content, evidence_ids=[entry_id], properties=meta)
+                    self.graph_manager.link_hypothesis_to_concept(content, category)
+
+                # If memory is a document chunk, also add it as hypothesis node for now to ensure visibility in graph
+                elif memory_type == "document_chunk":
+                    # We treat document chunks as hypotheses/claims from a file source
+                    self.graph_manager.add_hypothesis(text=content, evidence_ids=[entry_id], properties=meta)
+                    # Optionally link to a "Document" concept or similar if needed, but for now just presence is key
+
             return True
         except Exception as e:
-            print(f"[✗] Qdrant upsert failed: {e}")
+            print(f"[✗] Qdrant/Neo4j upsert failed: {e}")
             return False
 
     def add_shared_fact(self, content: str, source: str = "system", meta: Dict[str, Any] = None) -> bool:
@@ -227,6 +255,12 @@ class KnowledgeManager:
         except Exception as e:
             print(f"[✗] Qdrant reset failed: {e}")
             qdrant_success = False
+
+        # 3. Clear Graph Database
+        try:
+            self.graph_manager.clear_database()
+        except Exception as e:
+            print(f"[!] Graph reset warning: {e}")
 
         if db_success and qdrant_success:
             return {"status": "success", "message": "Knowledge base reset successfully."}

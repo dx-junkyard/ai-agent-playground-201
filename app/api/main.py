@@ -5,16 +5,22 @@ from typing import Any, Dict, List, Optional
 import logging
 import os
 from dotenv import load_dotenv
+import redis
 
 # .env ファイルを読み込む
 load_dotenv()
 
 from app.api.ai_client import AIClient
 from app.api.db import DBClient
+from app.api.workflow import WorkflowManager
 from app.api.state_manager import StateManager
 from app.api.components.knowledge_manager import KnowledgeManager
+from app.tasks.analysis import run_workflow_task, process_capture_task, process_document_task
 from pydantic import BaseModel, Field, HttpUrl
 import requests
+import aiofiles
+import uuid
+from fastapi import UploadFile, File, Form
 
 app = FastAPI()
 
@@ -46,65 +52,34 @@ class CaptureRequest(BaseModel):
     title: str
     content: str
     screenshot_url: Optional[str] = None
+    # Add dict method for easier serialization to Celery
+    def to_dict(self):
+        return {
+            "user_id": self.user_id,
+            "url": self.url,
+            "title": self.title,
+            "content": self.content,
+            "screenshot_url": self.screenshot_url
+        }
+
+class TopicDeepDiveRequest(BaseModel):
+    user_id: str
+    topic: str
 
 
 @app.post("/api/v1/webhook/capture")
 async def capture_webhook(payload: CaptureRequest):
-    repo = DBClient()
-    knowledge_manager = KnowledgeManager()
+    """
+    Receives browser capture data and offloads processing to a background task (Fire-and-Forget).
+    """
+    # Fire-and-forget: Push to Celery
+    task = process_capture_task.delay(payload.to_dict())
 
-    # Check for duplicate content (Vector Similarity)
-    # This prevents storing re-prints or slight variations of the same content
-    if knowledge_manager.is_duplicate_content(payload.content):
-        logger.info(f"Duplicate content detected for URL: {payload.url}")
-        return {"status": "skipped", "reason": "duplicate_content_detected", "matches": "high_similarity"}
-
-    # Save raw capture
-    capture_id = repo.save_captured_page(
-        user_id=payload.user_id,
-        url=payload.url,
-        title=payload.title,
-        content=payload.content,
-        screenshot_url=payload.screenshot_url
-    )
-    if not capture_id:
-        raise HTTPException(status_code=500, detail="Failed to save captured page")
-
-    # Process for Knowledge Base (L1/L3)
-    # Simple logic: check domain for Public status
-    visibility = "private"
-    memory_type = "user_hypothesis" # Treating captured content as user-related context
-
-    # Example logic for public domains (extend as needed)
-    trusted_domains = [".go.jp", ".ac.jp"]
-    if any(payload.url.endswith(domain) or f"{domain}/" in payload.url for domain in trusted_domains):
-        visibility = "public"
-        memory_type = "shared_fact"
-
-    # Summarize content (Simple truncation for now, could use LLM)
-    summary_content = f"Title: {payload.title}\nURL: {payload.url}\n\n{payload.content[:1000]}"
-
-    meta = {
-        "source_url": payload.url,
-        "title": payload.title,
-        "capture_id": capture_id
+    return {
+        "status": "queued",
+        "task_id": str(task.id),
+        "message": "Capture received and processing started in background."
     }
-
-    if visibility == "public":
-        knowledge_manager.add_shared_fact(
-            content=summary_content,
-            source="webhook_capture",
-            meta=meta
-        )
-    else:
-        knowledge_manager.add_user_memory(
-            user_id=payload.user_id,
-            content=summary_content,
-            memory_type=memory_type,
-            meta=meta
-        )
-
-    return {"status": "success", "capture_id": capture_id, "visibility": visibility}
 
 # health
 @app.get("/health")
@@ -123,19 +98,14 @@ async def create_user(request: Request) -> Dict[str, str]:
     user_id = repo.create_user(line_user_id=line_user_id)
     return {"user_id": user_id}
 
-from app.api.workflow import WorkflowManager
-
-# ... (imports)
-
 # LINEのWebhookエンドポイント
 @app.post("/api/v1/user-message")
-async def post_usermessage(request: Request) -> str:
+async def post_usermessage(request: Request) -> Dict[str, Any]:
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    ai_client = AIClient()
     message = body.get("message", "")
     user_id = body.get("user_id")
     if not user_id:
@@ -148,50 +118,36 @@ async def post_usermessage(request: Request) -> str:
     if not user_message_id:
         raise HTTPException(status_code=500, detail="Failed to store user message")
 
-    # Initialize WorkflowManager
-    workflow_manager = WorkflowManager(ai_client)
+    # Start background task for analysis
+    task = run_workflow_task.delay(user_id, message, user_message_id)
 
-    # Load state and history
-    history = repo.get_recent_conversation(user_id)
-    stored_state = repo.get_user_state(user_id)
-    current_state = StateManager.get_state_with_defaults(stored_state)
+    # Fetch Hot Cache from Redis for immediate suggestions
+    suggestions = []
+    try:
+        redis_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+        r = redis.from_url(redis_url)
+        cached_data = r.get(f"hot_cache:{user_id}")
+        if cached_data:
+            cache_json = json.loads(cached_data)
+            suggestions = cache_json.get("suggestions", [])
+    except Exception as e:
+        logger.warning(f"Failed to fetch hot cache for user {user_id}: {e}")
 
-    # Initialize context
-    initial_state = StateManager.init_conversation_context(
-        user_message=message,
-        dialog_history=history,
-        interest_profile=current_state["interest_profile"],
-        active_hypotheses=current_state["active_hypotheses"]
-    )
-    initial_state["user_id"] = user_id # Add user_id to state
+    # Quick Reply
+    quick_reply = "分析を開始しました。しばらくお待ちください。"
 
-    # Check for latest captured page context
-    latest_page = repo.get_latest_captured_page(user_id)
-    if latest_page:
-        initial_state["captured_page"] = latest_page
-
-    # Invoke workflow
-    final_state = workflow_manager.invoke(initial_state)
-    bot_message = final_state.get("bot_message", "申し訳ありません、エラーが発生しました。")
-
-    # Save updated state
-    repo.upsert_user_state(
-        user_id,
-        final_state["interest_profile"],
-        final_state["active_hypotheses"]
-    )
-
-    # Save analysis result
-    analysis_to_save = {
-        "interest_profile": final_state["interest_profile"],
-        "active_hypotheses": final_state["active_hypotheses"],
-        "hypotheses": final_state.get("hypotheses"),
-        "response_plan": final_state.get("response_plan")
+    return {
+        "message": quick_reply,
+        "task_id": str(task.id),
+        "status": "processing",
+        "suggestions": suggestions  # Include cached suggestions
     }
-    repo.record_analysis(user_id, user_message_id, analysis_to_save)
 
-    repo.insert_message(user_id, "ai", bot_message)
-    return bot_message
+@app.get("/api/v1/dashboard/innovations")
+async def get_innovation_history(user_id: str = Query(..., description="User ID"), limit: int = 10):
+    repo = DBClient()
+    history = repo.get_innovation_history(user_id, limit)
+    return {"history": history}
 
 from fastapi.responses import StreamingResponse
 
@@ -283,7 +239,8 @@ async def post_usermessage_stream(request: Request) -> StreamingResponse:
 
         yield json.dumps({
             "type": "result",
-            "message": bot_message
+            "message": bot_message,
+            "interest_profile": final_state.get("interest_profile")
         }, ensure_ascii=False) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
@@ -295,6 +252,29 @@ async def get_user_messages(user_id: str = Query(..., description="ユーザーI
     return messages
 
 # 以下のエンドポイントを追加してください
+@app.post("/api/v1/topic-deep-dive")
+async def topic_deep_dive(request: TopicDeepDiveRequest):
+    ai_client = AIClient()
+    repo = DBClient()
+
+    # Get recent conversation for context
+    history = repo.get_recent_conversation(request.user_id)
+
+    dialog_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history])
+
+    prompt = f"""これまでの会話を踏まえ、トピック『{request.topic}』についてこれまでの流れを簡潔にまとめ、ユーザーの知的好奇心を刺激するような鋭い質問を1つ提示してください。
+
+# 会話履歴:
+{dialog_text}
+
+JSON形式で {{'summary': '...', 'question': '...'}} と出力してください。"""
+
+    response = ai_client.generate_response(prompt)
+    if not response:
+        return {"summary": "情報の生成に失敗しました。", "question": "他に気になるトピックはありますか？"}
+
+    return response
+
 @app.post("/api/v1/auth/line")
 async def line_auth(request: LineAuthRequest):
     # 環境変数からシークレットを取得
@@ -341,6 +321,57 @@ async def line_auth(request: LineAuthRequest):
     
     return {"user_id": user_id, "line_user_id": line_user_id}
 
+
+@app.post("/api/v1/user-files/upload")
+async def upload_user_file(
+    user_id: str = Form(...),
+    title: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """
+    Handles PDF file upload, saves it, records in DB, and triggers background processing.
+    """
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    # Generate unique ID for the file
+    file_id = str(uuid.uuid4())
+
+    # Define storage path (ensure app/uploads exists)
+    upload_dir = "/app/uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # Create safe filename
+    file_ext = os.path.splitext(file.filename)[1]
+    safe_filename = f"{file_id}{file_ext}"
+    file_path = os.path.join(upload_dir, safe_filename)
+
+    # Save file to disk
+    try:
+        async with aiofiles.open(file_path, 'wb') as out_file:
+            content = await file.read()
+            await out_file.write(content)
+    except Exception as e:
+        logger.error(f"File save failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save file.")
+
+    # Insert into MySQL
+    repo = DBClient()
+    if not repo.insert_user_file(user_id, file.filename, file_path, title):
+        # Cleanup file if DB fails
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail="Database insertion failed.")
+
+    # Trigger Background Task
+    task = process_document_task.delay(user_id, file_path, title, file_id)
+
+    return {
+        "status": "uploaded",
+        "file_id": file_id,
+        "task_id": str(task.id),
+        "message": "File uploaded and processing started."
+    }
 
 
 if __name__ == "__main__":

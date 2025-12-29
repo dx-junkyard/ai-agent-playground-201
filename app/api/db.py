@@ -18,6 +18,8 @@ class DBClient:
         }
 
     def create_user(self, line_user_id=None):
+        conn = None
+        cursor = None
         import uuid
         user_id = str(uuid.uuid4())
         try:
@@ -45,7 +47,31 @@ class DBClient:
                 conn.close()
         return user_id
 
+    def insert_user_file(self, user_id: str, file_name: str, file_path: str, title: str) -> bool:
+        """
+        Inserts a record for an uploaded user file.
+        """
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.config)
+            cursor = conn.cursor()
+            query = "INSERT INTO user_files (user_id, file_name, file_path, title) VALUES (%s, %s, %s, %s)"
+            cursor.execute(query, (user_id, file_name, file_path, title))
+            conn.commit()
+            return True
+        except mysql.connector.Error as err:
+            print(f"[✗] MySQL Error: {err}")
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
     def insert_message(self, user_id, role, message):
+        conn = None
+        cursor = None
         try:
             conn = mysql.connector.connect(**self.config)
             cursor = conn.cursor()
@@ -86,6 +112,43 @@ class DBClient:
             cursor.execute(query, (user_id, limit))
             messages = cursor.fetchall()
             return messages
+        except mysql.connector.Error as err:
+            print(f"[✗] MySQL Error: {err}")
+            return []
+        finally:
+            if cursor: cursor.close()
+            if conn: conn.close()
+
+    def get_innovation_history(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        イノベーションモード（構造分解など）が行われた分析ログを取得する。
+        """
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.config)
+            cursor = conn.cursor(dictionary=True)
+            # MySQL 5.7/8.0のJSON関数を使用してフィルタリング
+            query = """
+                SELECT id, created_at, analysis
+                FROM user_message_analyses
+                WHERE user_id = %s
+                  AND JSON_EXTRACT(analysis, '$.structural_analysis') IS NOT NULL
+                ORDER BY id DESC
+                LIMIT %s
+            """
+            cursor.execute(query, (user_id, limit))
+            rows = cursor.fetchall()
+
+            results = []
+            for row in rows:
+                analysis_data = json.loads(row["analysis"]) if isinstance(row["analysis"], str) else row["analysis"]
+                results.append({
+                    "id": row["id"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                    "data": analysis_data
+                })
+            return results
         except mysql.connector.Error as err:
             print(f"[✗] MySQL Error: {err}")
             return []
@@ -156,6 +219,8 @@ class DBClient:
                 conn.close()
 
     def upsert_user_state(self, user_id: str, interest_profile: Dict[str, Any], active_hypotheses: Dict[str, Any]) -> None:
+        conn = None
+        cursor = None
         try:
             conn = mysql.connector.connect(**self.config)
             cursor = conn.cursor()
@@ -230,6 +295,8 @@ class DBClient:
                 conn.close()
 
     def record_analysis(self, user_id: str, user_message_id: int, analysis: Dict[str, Any]) -> None:
+        conn = None
+        cursor = None
         try:
             conn = mysql.connector.connect(**self.config)
             cursor = conn.cursor()

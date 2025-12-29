@@ -162,7 +162,10 @@ class WorkflowManager:
         result = self.interest_explorer.explore(state.copy())
         # AIが遷移を提案した場合、返答にそれを含める。
         # 次のターンのRouterでユーザーの同意があればモードが変わる運用。
-        return {"bot_message": result["bot_message"]}
+        return {
+            "bot_message": result["bot_message"],
+            "mode": result.get("suggested_mode", "discovery") # 次のターンのデフォルトとして保存
+        }
 
     # Research Nodes
     def _situation_analysis_node(self, state: GraphState) -> Dict[str, Any]:
@@ -174,17 +177,20 @@ class WorkflowManager:
             interest_profile = updated_context.get("interest_profile")
             if interest_profile:
                 topics = interest_profile.get("topics", [])
+                current_category = interest_profile.get("current_category", "General")
                 intent_goal = interest_profile.get("intent", {}).get("goal")
                 if intent_goal:
                      self.knowledge_manager.add_user_memory(
                         user_id=user_id,
                         content=f"User Goal: {intent_goal}",
                         memory_type="ai_insight",
+                        category=current_category,
                         meta={"source": "situation_analysis"}
                     )
         return {
             "interest_profile": updated_context["interest_profile"],
-            "active_hypotheses": updated_context["active_hypotheses"]
+            "active_hypotheses": updated_context["active_hypotheses"],
+            "conversation_summary": updated_context.get("conversation_summary", "")
         }
 
     def _hypothesis_generation_node(self, state: GraphState) -> Dict[str, Any]:
