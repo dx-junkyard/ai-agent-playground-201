@@ -13,3 +13,4 @@ celery
 redis
 neo4j
 pypdf
+aiofiles
