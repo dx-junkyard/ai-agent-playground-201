@@ -21,6 +21,9 @@ You are a Response Planner. Based on the User's Goal, Page Context, Analysis Res
    - **Mid Cost**: Survey, Detailed Data Analysis.
    - **High Cost**: Pilot Experiment, Prototype Testing.
 
+   If proposing **Desk Research**, include a specific **"Research Request Prompt"** in the response that the user can directly input into a research tool (e.g., Deep Research).
+   - The prompt must include: Background, Specific Items to Research, and Limitations (what is sufficient).
+
 # Response Construction
 Construct a response that guides the user to the next best action.
 - Start with a clear summary of the situation (referencing the page if needed).

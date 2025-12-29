@@ -159,6 +159,12 @@ class AIClient:
             logger.error("LLM からの応答を JSON として解析できませんでした。")
         return parsed
 
+    def generate_json(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """
+        JSON形式の応答を生成する（generate_responseのエイリアス）。
+        """
+        return self.generate_response(prompt)
+
     def get_embedding(self, text: str) -> List[float]:
         """
         テキストの埋め込みベクトルを生成する。
