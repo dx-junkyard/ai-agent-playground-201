@@ -172,6 +172,18 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
         for i in range(0, len(text_content), chunk_size - overlap):
             chunks.append(text_content[i:i + chunk_size])
 
+        # Infer category using TopicClient
+        try:
+            topic_client = TopicClient()
+            # Use first 1000 chars for prediction
+            predicted_category = topic_client.predict_category(text_content[:1000])
+        except Exception as e:
+            print(f"Topic prediction failed for document: {e}")
+            predicted_category = None
+
+        # Fallback if prediction fails or returns None
+        final_category = predicted_category if predicted_category else "Uncategorized"
+
         success_count = 0
         for i, chunk in enumerate(chunks):
             # Add to Knowledge Base with Metadata
@@ -188,7 +200,7 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
                 user_id=user_id,
                 content=chunk,
                 memory_type="document_chunk",
-                category="General", # Or infer category later
+                category=final_category,
                 meta=meta
             ):
                 success_count += 1
