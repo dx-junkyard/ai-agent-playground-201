@@ -21,7 +21,26 @@ app = FastAPI(title="BERTopic API Service")
 
 MODEL_PATH = "/app/models/my_bertopic_model"
 SEED_DATA_PATH = "seed_data.json"
-ZERO_SHOT_TOPICS = ["Health_Medical", "IT_Tech", "Travel_Leisure", "Food_Cooking", "Work_Career", "Daily_Life"]
+ZERO_SHOT_TOPICS = [
+    "政治_行政_法律_政策",
+    "経済_金融_ビジネス_産業",
+    "国際_社会問題_平和_人権",
+    "労働_働き方_キャリア",
+    "自然_環境_宇宙_気候",
+    "科学_数学_物理_生命",
+    "IT_テクノロジー_AI_情報",
+    "工学_製造_建築_インフラ",
+    "医療_健康_身体_ヘルスケア",
+    "心理_メンタル_精神_哲学",
+    "歴史_文化_言語_人類学",
+    "芸術_アート_デザイン_表現",
+    "エンタメ_サブカル_娯楽",
+    "生活_家事_住まい_育児",
+    "料理_グルメ_食文化",
+    "趣味_旅行_レジャー_活動",
+    "教育_学習_自己啓発",
+    "人間関係_家族_恋愛_対話"
+]
 
 class JapaneseTokenizer:
     def __init__(self):
