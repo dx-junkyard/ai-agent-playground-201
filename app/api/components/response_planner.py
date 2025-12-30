@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Dict, Any, Tuple
 from langchain_core.prompts import PromptTemplate
 from app.api.ai_client import AIClient
-from config import LLM_MODEL_COMPLEX
+from config import MODEL_RESPONSE_PLANNING
 
 class ResponsePlanner:
     """
@@ -28,7 +28,7 @@ class ResponsePlanner:
         """
         prompt = self._create_prompt(context)
 
-        result = self.ai_client.generate_response(prompt, model=LLM_MODEL_COMPLEX)
+        result = self.ai_client.generate_response(prompt, model=MODEL_RESPONSE_PLANNING)
 
         bot_message = "申し訳ありません、うまく応答を生成できませんでした。"
         if result:
