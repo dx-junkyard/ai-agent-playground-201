@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import numpy as np
 from typing import List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -148,7 +149,16 @@ def predict(payload: PredictRequest):
             label = info["CustomName"].values[0]
         elif "Name" in info.columns:
             label = "_".join(info["Name"].values[0].split("_")[1:3])
-    return {"topic_id": topic_id, "label": label, "probability": float(probs[0]) if probs is not None else 0.0}
+
+    prob_value = 0.0
+    if probs is not None:
+        # probs[0] is array -> get max, scalar -> use as is
+        if isinstance(probs[0], (np.ndarray, list)):
+             prob_value = float(np.max(probs[0]))
+        else:
+             prob_value = float(probs[0])
+
+    return {"topic_id": topic_id, "label": label, "probability": prob_value}
 
 @app.post("/train")
 def train(payload: TrainRequest):
