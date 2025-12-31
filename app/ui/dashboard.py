@@ -3,24 +3,22 @@ import requests
 import os
 import graphviz
 import json
+from streamlit_agraph import agraph, Node, Edge, Config
 
 API_URL = os.environ.get("API_URL", "http://api:8000/api/v1")
+
+def get_base_url():
+    """Helper to get base API URL"""
+    base_url = API_URL.split('/user-message')[0]
+    if base_url.endswith('/'):
+        base_url = base_url[:-1]
+    return base_url
 
 def fetch_innovation_history(user_id):
     """APIからイノベーション履歴を取得"""
     try:
-        # APIエンドポイントのURL構築
-        # ui.py defines API_URL as "http://api:8000/api/v1/user-message-stream" usually.
-        # We need to extract the base part.
-        base_url = API_URL.split('/user-message')[0]
-        if base_url.endswith('/'):
-            base_url = base_url[:-1]
-
+        base_url = get_base_url()
         target_url = f"{base_url}/dashboard/innovations"
-
-        # Check if we are running in a container network where 'api' host is accessible,
-        # or if we need to use localhost (e.g. if running locally outside docker).
-        # For now, we trust the env var.
 
         resp = requests.get(target_url, params={"user_id": user_id})
         resp.raise_for_status()
@@ -28,6 +26,20 @@ def fetch_innovation_history(user_id):
     except Exception as e:
         st.error(f"データ取得エラー: {e}")
         return []
+
+def fetch_knowledge_graph(user_id):
+    """APIからナレッジグラフデータを取得"""
+    try:
+        base_url = get_base_url()
+        target_url = f"{base_url}/dashboard/knowledge-graph"
+
+        resp = requests.get(target_url, params={"user_id": user_id, "limit": 15})
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        # Silent error is better here as we can show 'collecting data' message in UI
+        print(f"Graph fetch error: {e}")
+        return None
 
 def render_innovation_zipper(analysis_data):
     """構造分解データをGraphvizでジッパー状に可視化"""
@@ -100,13 +112,68 @@ def render_innovation_zipper(analysis_data):
 
     st.graphviz_chart(graph)
 
-def show_dashboard():
-    st.header("Innovation Dashboard 🧬")
+def render_knowledge_explorer():
+    st.subheader("Explore your Interest Graph")
 
-    if "user_id" not in st.session_state:
-        st.warning("ログインしてください")
+    user_id = st.session_state.get("user_id")
+    data = fetch_knowledge_graph(user_id)
+
+    if not data or not data.get("nodes"):
+        st.info("まだ十分な知識データがありません。チャットで興味のある話題について話しかけてみてください。")
         return
 
+    # agraph用データ変換
+    nodes = []
+    edges = []
+
+    for n in data["nodes"]:
+        nodes.append(Node(
+            id=n["id"],
+            label=n["label"],
+            size=n["size"],
+            color=n.get("color", "#5DADE2"),
+            symbolType="circle"
+        ))
+
+    for e in data["edges"]:
+        edges.append(Edge(
+            source=e["source"],
+            target=e["target"],
+            type=e.get("type", "RELATED")
+        ))
+
+    config = Config(
+        width=700,
+        height=500,
+        directed=True,
+        physics=True,
+        hierarchical=False,
+        nodeHighlightBehavior=True,
+        highlightColor="#F7A7A6",
+        collapsible=False
+    )
+
+    # グラフ描画とクリックイベントの取得
+    st.caption("ノードをクリックして詳細を確認し、分析を開始できます。")
+    selected_node_id = agraph(nodes=nodes, edges=edges, config=config)
+
+    if selected_node_id:
+        st.divider()
+        st.info(f"Selected Topic: **{selected_node_id}**")
+
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            if st.button("🧪 このテーマを構造分解する", use_container_width=True):
+                # UIのタブをチャットに切り替えるトリガー（ui.py側で制御が必要だが、ここではsession_stateにセット）
+                # ui.py handles navigation based on sidebar inputs usually.
+                # Since we are inside the dashboard component, we might need a way to signal navigation.
+                # Assuming simple instruction for now as per plan.
+
+                # Copy to clipboard or set internal state for Chat input
+                st.session_state["prefill_message"] = f"「{selected_node_id}」について構造分解して、イノベーションの機会を探してください。"
+                st.success(f"『{selected_node_id}』の分析準備が整いました。チャット画面へ移動して送信してください。")
+
+def render_innovation_history_tab():
     history = fetch_innovation_history(st.session_state["user_id"])
 
     if not history:
@@ -114,7 +181,6 @@ def show_dashboard():
         return
 
     # セレクターで過去のセッションを選択
-    # Use formatted string for display
     options = {f"{item['created_at']} (ID: {item['id']})": item for item in history}
     selected_time = st.selectbox("履歴を選択", list(options.keys()))
 
@@ -129,3 +195,19 @@ def show_dashboard():
         # 詳細テキスト表示
         with st.expander("詳細データを見る"):
             st.json(target_data)
+
+def show_dashboard():
+    st.header("Dashboard 🧠")
+
+    if "user_id" not in st.session_state:
+        st.warning("ログインしてください")
+        return
+
+    # タブの作成
+    tab1, tab2 = st.tabs(["🔭 Knowledge Explorer", "🧬 Innovation History"])
+
+    with tab1:
+        render_knowledge_explorer()
+
+    with tab2:
+        render_innovation_history_tab()
