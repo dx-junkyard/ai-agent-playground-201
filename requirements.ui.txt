@@ -5,3 +5,4 @@ python-dotenv>=1.0.0
 streamlit-audiorecorder>=0.0.6
 pydub>=0.25.1
 graphviz>=0.20.1
+streamlit-agraph>=0.0.45

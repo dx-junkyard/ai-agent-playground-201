@@ -177,6 +177,54 @@ class GraphManager:
             print(f"Error retrieving user interests: {e}")
         return results
 
+    def get_central_concepts(self, user_id: str, limit: int = 10) -> Dict[str, List[Any]]:
+        """
+        Retrieves 'Hub' concepts AND their connections.
+        Returns: {"nodes": [...], "edges": [...]}
+        """
+        if not self.driver: return {"nodes": [], "edges": []}
+
+        # 1. ノード取得と、2. エッジ取得をまとめて行うクエリ
+        # (f-stringのエスケープ {{ }} に注意)
+        query = f"""
+        MATCH (u:{self.LABEL_USER} {{id: $user_id}})-[:{self.REL_INTERESTED_IN}]->(c:{self.LABEL_CONCEPT})
+
+        // 次数計算
+        WITH c, COUNT {{ (c)--() }} as degree
+        WHERE degree > 0
+
+        // 上位N件に絞り込み
+        WITH c, degree
+        ORDER BY degree DESC
+        LIMIT $limit
+
+        // コレクションとしてまとめる
+        WITH collect(c) as concepts, collect({{name: c.name, degree: degree}}) as nodes_data
+
+        // 抽出されたコンセプト同士の関係を探す
+        UNWIND concepts as c1
+        UNWIND concepts as c2
+        OPTIONAL MATCH (c1)-[r]->(c2)
+        WHERE id(c1) < id(c2) // 重複排除
+
+        RETURN nodes_data, collect(DISTINCT {{source: c1.name, target: c2.name, label: type(r)}}) as edges_data
+        """
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, user_id=user_id, limit=limit)
+                record = result.single()
+                if record:
+                    return {
+                        "nodes": record["nodes_data"],
+                        # edges_data内の None (関係なし) をフィルタリング
+                        "edges": [e for e in record["edges_data"] if e["label"] is not None]
+                    }
+        except Exception as e:
+            print(f"Error retrieving knowledge graph: {e}")
+
+        return {"nodes": [], "edges": []}
+
     def clear_database(self):
         """Clears the entire graph (Use with caution!)."""
         if not self.driver: return

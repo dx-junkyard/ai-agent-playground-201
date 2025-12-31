@@ -16,6 +16,7 @@ from app.api.db import DBClient
 from app.api.workflow import WorkflowManager
 from app.api.state_manager import StateManager
 from app.api.components.knowledge_manager import KnowledgeManager
+from app.api.components.graph_manager import GraphManager
 from app.tasks.analysis import run_workflow_task, process_capture_task, process_document_task
 from pydantic import BaseModel, Field, HttpUrl
 import requests
@@ -149,6 +150,38 @@ async def get_innovation_history(user_id: str = Query(..., description="User ID"
     repo = DBClient()
     history = repo.get_innovation_history(user_id, limit)
     return {"history": history}
+
+@app.get("/api/v1/dashboard/knowledge-graph")
+async def get_knowledge_graph(user_id: str = Query(..., description="User ID"), limit: int = 15):
+    """
+    Retrieves the user's central concepts as a knowledge graph structure.
+    """
+    graph_manager = GraphManager()
+
+    # graph_data は {"nodes": [...], "edges": [...]} の形式になる
+    graph_data = graph_manager.get_central_concepts(user_id, limit=limit)
+
+    nodes = []
+    CONCEPT_COLOR = "#5DADE2"
+
+    # ノードデータの変換
+    for n in graph_data.get("nodes", []):
+        name = n.get("name")
+        degree = n.get("degree", 1)
+        size = 15 + min(degree * 2, 35)
+
+        nodes.append({
+            "id": name,
+            "label": name,
+            "size": size,
+            "color": CONCEPT_COLOR,
+            "type": "Concept"
+        })
+
+    # エッジデータの変換 (GraphManagerから返ってきたものをそのまま利用可だが、念のため整形)
+    edges = graph_data.get("edges", [])
+
+    return {"nodes": nodes, "edges": edges}
 
 from fastapi.responses import StreamingResponse
 
