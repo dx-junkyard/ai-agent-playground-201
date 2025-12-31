@@ -16,6 +16,7 @@ from app.api.db import DBClient
 from app.api.workflow import WorkflowManager
 from app.api.state_manager import StateManager
 from app.api.components.knowledge_manager import KnowledgeManager
+from app.api.components.graph_manager import GraphManager
 from app.tasks.analysis import run_workflow_task, process_capture_task, process_document_task
 from pydantic import BaseModel, Field, HttpUrl
 import requests
@@ -149,6 +150,44 @@ async def get_innovation_history(user_id: str = Query(..., description="User ID"
     repo = DBClient()
     history = repo.get_innovation_history(user_id, limit)
     return {"history": history}
+
+@app.get("/api/v1/dashboard/knowledge-graph")
+async def get_knowledge_graph(user_id: str = Query(..., description="User ID"), limit: int = 15):
+    """
+    Retrieves the user's central concepts as a knowledge graph structure.
+    """
+    graph_manager = GraphManager()
+
+    # 1. Get Central Concepts
+    concepts = graph_manager.get_central_concepts(user_id, limit=limit)
+
+    # 2. Convert to Nodes and Edges format for UI
+    nodes = []
+    edges = []
+
+    # Simple color scheme
+    CONCEPT_COLOR = "#5DADE2"
+
+    for concept in concepts:
+        name = concept.get("name")
+        degree = concept.get("degree", 1)
+
+        # Scale size based on degree (min 15, max 50 approximately)
+        size = 15 + min(degree * 2, 35)
+
+        nodes.append({
+            "id": name,
+            "label": name,
+            "size": size,
+            "color": CONCEPT_COLOR,
+            "type": "Concept"
+        })
+
+        # Optionally, we could add edges between these top concepts if they exist
+        # For now, we return just the nodes as 'Hubs'
+
+    # Use 'nodes' and 'edges' keys to match UI expectations
+    return {"nodes": nodes, "edges": edges}
 
 from fastapi.responses import StreamingResponse
 
