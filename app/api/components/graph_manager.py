@@ -213,6 +213,56 @@ class GraphManager:
 
         return results
 
+    def get_node_neighbors(self, user_id: str, node_id: str) -> Dict[str, List[Any]]:
+        """
+        Retrieves immediate neighbors of a specific node.
+        Used for 'expanding' a node in the UI.
+        """
+        if not self.driver: return {"nodes": [], "edges": []}
+
+        # 特定のユーザーに関連するグラフ内でのみ探索するように制約をかける
+        # (他人のデータや無関係なパブリックデータが混ざらないように)
+        query = f"""
+        MATCH (u:{self.LABEL_USER} {{id: $user_id}})
+        MATCH (center) WHERE center.name = $node_id
+
+        // ユーザーのグラフに関連しているか確認（パスが存在するか）
+        // ※厳密すぎると出ない場合があるので、一旦center起点で探索し、
+        //   必要であればユーザーフィルタを追加する方針でも可。
+        //   ここではシンプルに center と隣接ノードを取得。
+
+        MATCH (center)-[r]-(neighbor)
+        RETURN
+            {{id: center.name, label: center.name, labels: labels(center)}} as center_node,
+            {{source: startNode(r).name, target: endNode(r).name, label: type(r)}} as edge_data,
+            {{id: neighbor.name, label: neighbor.name, labels: labels(neighbor)}} as neighbor_node
+        LIMIT 50
+        """
+
+        nodes_map = {}
+        edges_list = []
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, user_id=user_id, node_id=node_id)
+                for record in result:
+                    # ノードの重複排除
+                    c_node = record["center_node"]
+                    n_node = record["neighbor_node"]
+                    nodes_map[c_node["id"]] = c_node
+                    nodes_map[n_node["id"]] = n_node
+
+                    # エッジの追加
+                    edges_list.append(record["edge_data"])
+
+        except Exception as e:
+            print(f"Error getting neighbors: {e}")
+
+        return {
+            "nodes": list(nodes_map.values()),
+            "edges": edges_list
+        }
+
     def clear_database(self):
         """Clears the entire graph (Use with caution!)."""
         if not self.driver: return

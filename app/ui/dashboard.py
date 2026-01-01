@@ -41,6 +41,19 @@ def fetch_knowledge_graph(user_id):
         print(f"Graph fetch error: {e}")
         return None
 
+def fetch_neighbors(user_id, node_id):
+    """ノードの隣接情報を取得"""
+    try:
+        base_url = get_base_url()
+        target_url = f"{base_url}/dashboard/knowledge-graph/neighbors"
+
+        resp = requests.get(target_url, params={"user_id": user_id, "node_id": node_id})
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        st.error(f"隣接データ取得エラー: {e}")
+        return {"nodes": [], "edges": []}
+
 def render_innovation_zipper(analysis_data):
     """構造分解データをGraphvizでジッパー状に可視化"""
 
@@ -112,15 +125,52 @@ def render_innovation_zipper(analysis_data):
 
     st.graphviz_chart(graph)
 
+def merge_graph_data(current_nodes, current_edges, new_data, node_styles):
+    """既存のグラフデータに新しいデータをマージするヘルパー関数"""
+    existing_ids = {n.id for n in current_nodes}
+    existing_edges = {(e.source, e.target) for e in current_edges}
+
+    # ノードのマージ
+    for n in new_data.get("nodes", []):
+        if n["id"] not in existing_ids:
+            node_type = n.get("type", "Concept")
+            style = node_styles.get(node_type, node_styles["Concept"])
+
+            # APIからの色指定があれば優先
+            color = n.get("color") or style["color"]
+            size = n.get("size") or style["size"]
+
+            # Nodeオブジェクト作成
+            # 注: agraphのNodeはkwargsを受け入れてJS側に渡すことがあるが、
+            # Py側でのアクセスには限界があるため、識別子はid等に頼る。
+            # ここではtypeを保持するためにkwargsとして渡す。
+            current_nodes.append(Node(
+                id=n["id"],
+                label=n["label"],
+                size=size,
+                color=color,
+                symbolType=style.get("symbolType", "circle"),
+                title=n.get("label"), # hover
+                type=node_type # カスタム属性として保持
+            ))
+            existing_ids.add(n["id"])
+
+    # エッジのマージ
+    for e in new_data.get("edges", []):
+        if (e["source"], e["target"]) not in existing_edges:
+            current_edges.append(Edge(
+                source=e["source"],
+                target=e["target"],
+                label=e.get("label", ""),
+                color="#BDC3C7"
+            ))
+            existing_edges.add((e["source"], e["target"]))
+
+    return current_nodes, current_edges
+
 def render_graph_view():
     st.subheader("Explore your Interest Graph")
-
     user_id = st.session_state.get("user_id")
-    data = fetch_knowledge_graph(user_id)
-
-    if not data or not data.get("nodes"):
-        st.info("まだ十分な知識データがありません。チャットで興味のある話題について話しかけてみてください。")
-        return
 
     # ノードスタイルの定義
     NODE_STYLES = {
@@ -128,40 +178,24 @@ def render_graph_view():
         "Category": {"color": "#5DADE2", "size": 25, "symbolType": "circle"}, # Alias
         "Keyword": {"color": "#82E0AA", "size": 15, "symbolType": "diamond"}, # Green
         "Hypothesis": {"color": "#E74C3C", "size": 20, "symbolType": "triangle"}, # Red
-        "User": {"color": "#F1C40F", "size": 30, "symbolType": "star"}        # Yellow
+        "User": {"color": "#F1C40F", "size": 30, "symbolType": "star"},       # Yellow
+        "Document": {"color": "#95A5A6", "size": 20, "symbolType": "square"}  # Gray
     }
 
-    # agraph用データ変換
-    nodes = []
-    edges = []
+    # 1. Session Stateの初期化
+    if "graph_nodes" not in st.session_state:
+        st.session_state["graph_nodes"] = []
+        st.session_state["graph_edges"] = []
+        st.session_state["expanded_nodes"] = set() # 展開済みノード管理
 
-    for n in data["nodes"]:
-        # ノードタイプに基づくスタイル適用
-        node_type = n.get("type", "Concept")
-        style = NODE_STYLES.get(node_type, NODE_STYLES["Concept"])
+        # 初期データのロード (Hub一覧)
+        init_data = fetch_knowledge_graph(user_id)
+        if init_data:
+            st.session_state["graph_nodes"], st.session_state["graph_edges"] = merge_graph_data(
+                [], [], init_data, NODE_STYLES
+            )
 
-        # APIからの色指定があれば優先、なければスタイルの色
-        color = n.get("color") or style["color"]
-        size = n.get("size") or style["size"]
-
-        nodes.append(Node(
-            id=n["id"],
-            label=n["label"],
-            size=size,
-            color=color,
-            symbolType=style.get("symbolType", "circle"),
-            # 追加プロパティを保持 (titleなど)
-            title=n.get("label") # ホバー時に表示
-        ))
-
-    for e in data["edges"]:
-        edges.append(Edge(
-            source=e["source"],
-            target=e["target"],
-            type=e.get("type", "RELATED"),
-            color="#BDC3C7"
-        ))
-
+    # 2. グラフ描画
     config = Config(
         width="100%",
         height=600,
@@ -175,45 +209,63 @@ def render_graph_view():
         link={"labelProperty": "type", "renderLabel": False}
     )
 
-    # グラフ描画とクリックイベントの取得
     st.caption("ノードをクリックして詳細を確認できます。")
 
-    # 状態保持のためのkey設定
-    selected_node_id = agraph(nodes=nodes, edges=edges, config=config)
+    # keyを指定して状態を維持
+    selected_node_id = agraph(
+        nodes=st.session_state["graph_nodes"],
+        edges=st.session_state["graph_edges"],
+        config=config,
+        key="main_graph"
+    )
 
-    # 詳細情報の表示
+    # 3. インタラクション処理
     if selected_node_id:
-        # 選択されたノードのデータを検索
-        selected_node = next((n for n in data["nodes"] if n["id"] == selected_node_id), None)
-
-        st.divider()
-        st.subheader(f"Selected: {selected_node_id}")
+        # 選択されたノードオブジェクトを探す
+        # Nodeオブジェクトの属性にアクセスする
+        selected_node = next((n for n in st.session_state["graph_nodes"] if n.id == selected_node_id), None)
 
         if selected_node:
-            cols = st.columns(2)
-            with cols[0]:
-                st.markdown(f"**Type:** {selected_node.get('type', 'Unknown')}")
-                st.markdown(f"**Label:** {selected_node.get('label', '-')}")
-            with cols[1]:
-                # 確信度などがAPIから返ってくる場合
-                if "confidence" in selected_node:
-                    st.markdown(f"**Confidence:** {selected_node['confidence']:.2f}")
-                if "source" in selected_node:
-                    st.markdown(f"**Source:** {selected_node['source']}")
+            # agraphのNodeクラスがkwargsを__dict__に入れると仮定
+            # もし入らない場合はデフォルト値
+            node_type = getattr(selected_node, "type", "Concept")
 
-            # 関連ドキュメントなどがAPIに含まれていれば表示
-            if "documents" in selected_node:
-                st.write("**Related Documents:**")
-                for doc in selected_node["documents"]:
-                    st.write(f"- {doc}")
+            # --- ACTION PANEL ---
+            with st.sidebar:
+                st.header(f"Selected: {selected_node.label}")
+                st.markdown(f"Type: **{node_type}**")
 
-            # アクションボタン
-            if st.button("🧪 このテーマを構造分解する", key=f"btn_{selected_node_id}", use_container_width=True):
-                st.session_state["prefill_message"] = f"「{selected_node_id}」について構造分解して、イノベーションの機会を探してください。"
-                st.success(f"『{selected_node_id}』の分析準備が整いました。チャット画面へ移動して送信してください。")
+                # A. Hubの場合: 展開/収納
+                if node_type in ["Concept", "Category"]:
+                    if selected_node_id in st.session_state["expanded_nodes"]:
+                        st.success("展開済み (Expanded)")
+                    else:
+                        if st.button("📡 関連情報を展開する (Expand)", key=f"expand_{selected_node_id}"):
+                            with st.spinner("関連情報を取得中..."):
+                                # APIを叩いてデータを取得
+                                neighbors = fetch_neighbors(user_id, selected_node_id)
 
-        else:
-            st.warning("ノードの詳細情報が見つかりません。")
+                                # データをマージ
+                                st.session_state["graph_nodes"], st.session_state["graph_edges"] = merge_graph_data(
+                                    st.session_state["graph_nodes"],
+                                    st.session_state["graph_edges"],
+                                    neighbors,
+                                    NODE_STYLES
+                                )
+
+                                # 展開済みフラグを立てる
+                                st.session_state["expanded_nodes"].add(selected_node_id)
+                                st.rerun() # 再描画して新しいノードを表示
+
+                # B. Leafの場合: 詳細表示
+                elif node_type == "Hypothesis":
+                    st.info("仮説の詳細情報はチャットで確認できます。")
+
+                st.divider()
+                # 共通: 構造分解ボタン
+                if st.button("🧪 構造分解する", key=f"analyze_{selected_node_id}"):
+                    st.session_state["prefill_message"] = f"「{selected_node_id}」について構造分解して、イノベーションの機会を探してください。"
+                    st.success(f"『{selected_node_id}』の分析準備が整いました。チャット画面へ移動して送信してください。")
 
 def render_innovation_history_tab():
     history = fetch_innovation_history(st.session_state["user_id"])
