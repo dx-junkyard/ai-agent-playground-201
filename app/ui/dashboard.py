@@ -149,7 +149,7 @@ def merge_graph_data(current_nodes, current_edges, new_data, node_styles):
                 label=n["label"],
                 size=size,
                 color=color,
-                symbolType=style.get("symbolType", "circle"),
+                shape=style.get("shape", "dot"),
                 title=n.get("label"), # hover
                 type=node_type, # カスタム属性として保持
                 properties=n.get("properties", {})
