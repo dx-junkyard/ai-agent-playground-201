@@ -189,6 +189,37 @@ async def get_knowledge_graph(user_id: str = Query(..., description="User ID"), 
     # Use 'nodes' and 'edges' keys to match UI expectations
     return {"nodes": nodes, "edges": edges}
 
+@app.get("/api/v1/dashboard/knowledge-graph/neighbors")
+async def get_graph_neighbors(user_id: str = Query(..., description="User ID"), node_id: str = Query(..., description="Target Node ID")):
+    """
+    Retrieves neighbors for a specific node to support progressive expansion.
+    """
+    graph_manager = GraphManager()
+    data = graph_manager.get_node_neighbors(user_id, node_id)
+
+    # UI向けのフォーマット変換
+    nodes = []
+    for n in data["nodes"]:
+        # Neo4jのlabelsリストから代表ラベル（Concept, Keyword等）を決定
+        # 優先度: User > Hypothesis > Concept > Keyword > ...
+        lbls = n.get("labels", [])
+        node_type = "Concept" # Default
+        if "User" in lbls: node_type = "User"
+        elif "Hypothesis" in lbls: node_type = "Hypothesis"
+        elif "Keyword" in lbls: node_type = "Keyword"
+        elif "Document" in lbls: node_type = "Document"
+
+        nodes.append({
+            "id": n["id"],
+            "label": n["label"],
+            "type": node_type,
+            # sizeやcolorはUI側で状態に応じて決定するため、ここでは最低限でOK
+            # ただし、UI側で使いやすいようにラベル情報も渡しておく
+            "labels": lbls
+        })
+
+    return {"nodes": nodes, "edges": data["edges"]}
+
 from fastapi.responses import StreamingResponse
 
 @app.post("/api/v1/user-message-stream")
