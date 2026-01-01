@@ -151,7 +151,8 @@ def merge_graph_data(current_nodes, current_edges, new_data, node_styles):
                 color=color,
                 symbolType=style.get("symbolType", "circle"),
                 title=n.get("label"), # hover
-                type=node_type # カスタム属性として保持
+                type=node_type, # カスタム属性として保持
+                properties=n.get("properties", {})
             ))
             existing_ids.add(n["id"])
 
@@ -259,7 +260,19 @@ def render_graph_view():
 
                 # B. Leafの場合: 詳細表示
                 elif node_type == "Hypothesis":
-                    st.info("仮説の詳細情報はチャットで確認できます。")
+                    props = getattr(selected_node, "properties", {})
+                    st.markdown("### 📝 仮説の内容")
+                    st.info(props.get("text", "詳細テキストがありません"))
+                    if "logic" in props:
+                        st.markdown(f"**ロジック:** {props['logic']}")
+
+                elif node_type == "Document":
+                    props = getattr(selected_node, "properties", {})
+                    st.markdown(f"### 📄 {props.get('title', 'ドキュメント')}")
+                    if "summary" in props:
+                        st.caption(props["summary"])
+                    if "url" in props:
+                        st.link_button("🔗 元記事を開く", props["url"])
 
                 st.divider()
                 # 共通: 構造分解ボタン
