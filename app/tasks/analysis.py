@@ -58,6 +58,7 @@ def run_workflow_task(user_id: str, message: str, user_message_id: Optional[str]
         # --- Topic Service Integration ---
         try:
             topic_client = TopicClient()
+            # Note: logging is handled inside TopicClient
             analysis_result = topic_client.analyze_content(message)
             categories = analysis_result.get("categories", [])
 
@@ -66,7 +67,6 @@ def run_workflow_task(user_id: str, message: str, user_message_id: Optional[str]
                 final_state["interest_profile"]["categories"] = categories
 
                 # 2. Sync main context (for Conversation)
-                # Use the highest confidence one as current_category
                 primary_category = categories[0]["name"]
                 final_state["interest_profile"]["current_category"] = primary_category
 
@@ -79,14 +79,13 @@ def run_workflow_task(user_id: str, message: str, user_message_id: Optional[str]
 
         # --- Knowledge Graph Update Logic ---
         try:
-            # Update User Interest (Categories & Keywords)
             profile = final_state.get("interest_profile", {})
             categories = profile.get("categories", [])
+            current_category = profile.get("current_category") # Define current_category here
 
             # If no categories list, fallback to current_category (backward compatibility)
-            if not categories and profile.get("current_category"):
-                current_cat = profile.get("current_category")
-                categories = [{"name": current_cat, "confidence": 0.9, "keywords": []}]
+            if not categories and current_category:
+                categories = [{"name": current_category, "confidence": 0.9, "keywords": []}]
 
             for cat in categories:
                 cat_name = cat.get("name")
@@ -159,14 +158,13 @@ def run_workflow_task(user_id: str, message: str, user_message_id: Optional[str]
 def process_document_task(user_id: str, file_path: str, title: str, file_id: str):
     """
     Background task to process uploaded documents (PDF).
-    Extracts text, chunks it, and saves it to KnowledgeManager with metadata.
     """
     try:
-        print(f"Starting process_document_task for {file_path}")
+        logger.info(f"Starting process_document_task for {file_path}")
         km = KnowledgeManager()
 
         if not os.path.exists(file_path):
-            print(f"File not found: {file_path}")
+            logger.error(f"File not found: {file_path}")
             return {"status": "error", "message": "File not found"}
 
         text_content = ""
@@ -175,34 +173,36 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
             for page in reader.pages:
                 text_content += page.extract_text() + "\n"
         except Exception as e:
-            print(f"Error reading PDF: {e}")
+            logger.error(f"Error reading PDF: {e}")
             return {"status": "error", "message": f"PDF reading failed: {str(e)}"}
 
         if not text_content.strip():
              return {"status": "error", "message": "No text content extracted"}
 
-        # Simple Chunking (can be improved with LangChain RecursiveCharacterTextSplitter later)
+        # Infer category using TopicClient
+        try:
+            topic_client = TopicClient()
+            # Use first 1000 chars for prediction
+            # Note: Logging handled inside TopicClient
+            predicted_category = topic_client.predict_category(text_content[:1000])
+        except Exception as e:
+            logger.warning(f"Topic prediction failed for document: {e}")
+            predicted_category = None
+
+        final_category = predicted_category if predicted_category else "Uncategorized"
+
+        # [LOG] 最終的なカテゴリの記録
+        logger.info(f"Document '{title}' categorized as: {final_category}")
+
+        # Chunking & Saving
         chunk_size = 1000
         overlap = 100
         chunks = []
         for i in range(0, len(text_content), chunk_size - overlap):
             chunks.append(text_content[i:i + chunk_size])
 
-        # Infer category using TopicClient
-        try:
-            topic_client = TopicClient()
-            # Use first 1000 chars for prediction
-            predicted_category = topic_client.predict_category(text_content[:1000])
-        except Exception as e:
-            print(f"Topic prediction failed for document: {e}")
-            predicted_category = None
-
-        # Fallback if prediction fails or returns None
-        final_category = predicted_category if predicted_category else "Uncategorized"
-
         success_count = 0
         for i, chunk in enumerate(chunks):
-            # Add to Knowledge Base with Metadata
             meta = {
                 "file_id": file_id,
                 "title": title,
@@ -210,8 +210,6 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
                 "source": "uploaded_file"
             }
 
-            # Using 'user_stated' or 'user_hypothesis' type?
-            # Files are usually "external info" but for RAG purposes we treat them as private memory for now.
             if km.add_user_memory(
                 user_id=user_id,
                 content=chunk,
@@ -221,18 +219,17 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
             ):
                 success_count += 1
 
-        print(f"Processed {success_count} chunks for {title}")
+        logger.info(f"Processed {success_count} chunks for {title}")
         return {"status": "completed", "chunks_processed": success_count}
 
     except Exception as e:
-        print(f"Task failed: {e}")
+        logger.error(f"Task failed: {e}", exc_info=True)
         return {"status": "failed", "error": str(e)}
 
 @celery_app.task(name="process_capture_task")
 def process_capture_task(payload: Dict[str, Any]):
     """
     Background task to process browser captures.
-    Filters content (Filter Agent) and saves important knowledge.
     """
     logger.info(f"Processing capture for url: {payload.get('url')}")
 
@@ -251,23 +248,18 @@ def process_capture_task(payload: Dict[str, Any]):
         knowledge_manager = KnowledgeManager()
         repo = DBClient()
 
-        # 1. Check Duplicates (KnowledgeBase level)
         if knowledge_manager.is_duplicate_content(content):
             logger.info(f"Duplicate content skipped: {url}")
             return {"status": "skipped", "reason": "duplicate"}
 
-        # 2. Filter Agent (LLM Classification)
-        # Load prompt
         prompt_path = os.path.join(os.path.dirname(__file__), "../static/prompts/content_filtering.txt")
         try:
             with open(prompt_path, "r") as f:
                 prompt_template = f.read()
         except FileNotFoundError:
-            # Fallback if file not found
             prompt_template = "Classify content: {content}. Return JSON {{category: 'Interest'|'Operation'|'Notification'}}"
 
-        prompt = prompt_template.replace("{content}", content[:2000]) # Limit content for token efficiency
-
+        prompt = prompt_template.replace("{content}", content[:2000])
         classification_res = ai_client.generate_json(prompt, model=MODEL_CAPTURE_FILTERING)
 
         category = classification_res.get("category", "Notification")
@@ -275,9 +267,7 @@ def process_capture_task(payload: Dict[str, Any]):
 
         logger.info(f"Capture classified as: {category} ({reason})")
 
-        # 3. Action based on Category
         if category == "Interest":
-            # Save to SQL (Raw Log)
             capture_id = repo.save_captured_page(
                 user_id=user_id,
                 url=url,
@@ -286,8 +276,6 @@ def process_capture_task(payload: Dict[str, Any]):
                 screenshot_url=screenshot_url
             )
 
-            # Save to Knowledge Base (Vector/Graph)
-            # Determine visibility/type
             visibility = "private"
             trusted_domains = [".go.jp", ".ac.jp"]
             if any(url.endswith(d) or f"{d}/" in url for d in trusted_domains):
@@ -299,21 +287,17 @@ def process_capture_task(payload: Dict[str, Any]):
             if visibility == "public":
                 knowledge_manager.add_shared_fact(summary, "webhook_capture", meta)
             else:
-                # --- Topic Service Integration for Capture ---
                 category_for_memory = "CapturedInterest"
                 try:
                     topic_client = TopicClient()
-                    analysis = topic_client.analyze_content(content[:500]) # Use first 500 chars
+                    # Logging handled inside TopicClient
+                    analysis = topic_client.analyze_content(content[:500])
                     categories = analysis.get("categories", [])
 
                     if categories:
-                        # Use top category for memory
                         category_for_memory = categories[0]["name"]
-
-                        # Add full category info to meta
                         meta["detected_categories"] = categories
 
-                        # Update Graph with all found categories/keywords
                         for cat in categories:
                             knowledge_manager.graph_manager.add_category_and_keywords(
                                 user_id=user_id,
@@ -324,7 +308,6 @@ def process_capture_task(payload: Dict[str, Any]):
                             )
                 except Exception as e:
                     logger.warning(f"Topic analysis failed in capture: {e}")
-                # ---------------------------------------------
 
                 knowledge_manager.add_user_memory(
                     user_id=user_id,
@@ -335,13 +318,10 @@ def process_capture_task(payload: Dict[str, Any]):
                 )
 
             logger.info(f"Saved 'Interest' content for user {user_id}")
-
-            # Trigger Hot Cache update because knowledge changed
             generate_hot_cache_task.delay(user_id)
 
         else:
             logger.info(f"Skipping storage for category: {category}")
-            # We do NOT save to SQL or KB for Operation/Notification
 
     except Exception as e:
         logger.error(f"Error in process_capture_task: {e}", exc_info=True)

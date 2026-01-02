@@ -14,6 +14,9 @@ class TopicClient:
         Analyzes the text and returns a list of categories with keywords.
         Returns format: {"categories": [{"name": "...", "confidence": 0.9, "keywords": [...]}, ...]}
         """
+        # [LOG] 入力テキストの記録 (長すぎる場合は切り詰める)
+        logger.info(f"[TopicClient] Analyzing Text ({len(text)} chars): {text[:100].replace(chr(10), ' ')}...")
+
         try:
             resp = requests.post(
                 f"{self.api_url}/predict",
@@ -21,10 +24,22 @@ class TopicClient:
                 timeout=5.0
             )
             if resp.status_code == 200:
-                return resp.json()
+                result = resp.json()
+                categories = result.get("categories", [])
+
+                # [LOG] 判定結果の記録
+                if categories:
+                    top_cat = categories[0]
+                    logger.info(f"[TopicClient] Result: {top_cat['name']} (conf={top_cat.get('confidence')})")
+                else:
+                    logger.info("[TopicClient] Result: No categories detected")
+
+                return result
+
+            logger.warning(f"[TopicClient] API returned status {resp.status_code}")
             return {"categories": []}
         except Exception as e:
-            logger.warning(f"Topic API call failed: {e}")
+            logger.warning(f"[TopicClient] API call failed: {e}")
             return {"categories": []}
 
     def predict_category(self, text: str) -> Optional[str]:
