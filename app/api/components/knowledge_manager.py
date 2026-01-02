@@ -126,7 +126,14 @@ class KnowledgeManager:
                 elif memory_type == "document_chunk":
                     # We treat document chunks as hypotheses/claims from a file source
                     self.graph_manager.add_hypothesis(text=content, evidence_ids=[entry_id], properties=meta)
-                    # Optionally link to a "Document" concept or similar if needed, but for now just presence is key
+
+                    # ★修正: カテゴリ（コンセプト）との関連付けを追加
+                    if category and category != "General":
+                        self.graph_manager.link_hypothesis_to_concept(
+                            hypothesis_text=content,
+                            concept_name=category,
+                            rel_type="MENTIONED_IN"
+                        )
 
             return True
         except Exception as e:
