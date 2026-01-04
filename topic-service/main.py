@@ -89,7 +89,7 @@ class KnowledgeBase:
         except Exception as e:
             logger.error(f"Failed to create embeddings: {e}")
 
-    def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         if self.vectors is None or len(self.vectors) == 0:
             return []
 
