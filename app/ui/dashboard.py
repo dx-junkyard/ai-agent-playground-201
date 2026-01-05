@@ -248,7 +248,22 @@ def render_innovation_zipper(analysis_data):
 def merge_graph_data(current_nodes, current_edges, new_data, node_styles):
     """既存のグラフデータに新しいデータをマージするヘルパー関数"""
     existing_ids = {n.id for n in current_nodes}
-    existing_edges = {(e.source, e.target) for e in current_edges}
+
+    # --- 修正開始: Edgeオブジェクトの属性アクセスを安全に行う ---
+    existing_edges = set()
+    for e in current_edges:
+        # Edgeオブジェクトからsource/targetを取得（存在しない場合はNone）
+        s = getattr(e, "source", None)
+        t = getattr(e, "target", None)
+
+        # 属性が見つからない場合のフォールバック（__dict__経由など）
+        if s is None and hasattr(e, "__dict__"):
+             s = e.__dict__.get("source")
+             t = e.__dict__.get("target")
+
+        if s and t:
+            existing_edges.add((s, t))
+    # --- 修正終了 -------------------------------------------
 
     for n in new_data.get("nodes", []):
         if n["id"] not in existing_ids:

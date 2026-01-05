@@ -6,6 +6,7 @@ import redis
 import pypdf
 import uuid
 from typing import Dict, Any, Optional
+from qdrant_client.models import PointStruct
 
 from app.core.celery_app import celery_app
 from app.api.workflow import WorkflowManager
@@ -280,23 +281,61 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
             chunks.append(text_content[i:i + chunk_size])
 
         success_count = 0
-        for i, chunk in enumerate(chunks):
-            meta = {
-                "file_id": file_id,
-                "title": title,
-                "chunk_index": i,
-                "source": "uploaded_file",
-                "all_categories": [c["name"] for c in detected_categories] # メタデータにも全カテゴリを残す
-            }
 
-            if km.add_user_memory(
-                user_id=user_id,
-                content=chunk,
-                memory_type="document_chunk",
-                category=primary_category,
-                meta=meta
-            ):
+        # --- 修正開始: 新しい保存ロジック ---
+        for i, chunk in enumerate(chunks):
+            chunk_id = str(uuid.uuid4())
+
+            # 1. Embedding生成
+            vector = km.ai_client.get_embedding(chunk)
+            if not vector:
+                continue
+
+            # 2. Qdrant (Vector DB) へ保存
+            # DocumentChunkとして保存し、検索可能にする
+            payload = {
+                "user_id": user_id,
+                "category": primary_category,
+                "type": "document_chunk",
+                "visibility": "private",
+                "content": chunk,
+                "meta": {
+                    "file_id": file_id,
+                    "title": title,
+                    "chunk_index": i,
+                    "source": "uploaded_file"
+                }
+            }
+            try:
+                km._setup_qdrant_collection()
+                km.qdrant_client.upsert(
+                    collection_name=km.collection_name,
+                    points=[PointStruct(id=chunk_id, vector=vector, payload=payload)]
+                )
+            except Exception as e:
+                logger.error(f"Qdrant upsert failed: {e}")
+                continue
+
+            # 3. Graph (Structure) へ保存
+            try:
+                # Chunkノードを作成
+                km.graph_manager.add_chunk(
+                    text=chunk,
+                    evidence_ids=[chunk_id],
+                    properties={"index": i, "file_id": file_id}
+                )
+
+                # Fileノードにリンク (DocumentChunk -[PART_OF]-> Document)
+                # ※ title は add_document で作成した text と一致させる必要があります
+                km.graph_manager.link_chunk_to_document(
+                    chunk_text=chunk,
+                    file_node_text=title,
+                    rel_type="PART_OF"
+                )
                 success_count += 1
+            except Exception as e:
+                logger.error(f"Graph update failed for chunk {i}: {e}")
+        # --- 修正終了 -----------------------
 
         logger.info(f"Processed {success_count} chunks for {title}")
         return {"status": "completed", "chunks_processed": success_count}
