@@ -6,11 +6,13 @@ class GraphManager:
     # Node Labels
     LABEL_USER = "User"
     LABEL_CONCEPT = "Concept"
+    LABEL_KEYWORD = "Keyword"
     LABEL_HYPOTHESIS = "Hypothesis"
     LABEL_DOCUMENT = "Document"
 
     # Edge Types
     REL_INTERESTED_IN = "INTERESTED_IN"
+    REL_BELONGS_TO = "BELONGS_TO"
     REL_MENTIONED_IN = "MENTIONED_IN"
     REL_IMPLIES = "IMPLIES"
     REL_VERIFIED_BY = "VERIFIED_BY"
@@ -91,6 +93,54 @@ class GraphManager:
         except Exception as e:
             print(f"Error adding interest edge: {e}")
 
+    def delete_user_interest(self, user_id: str, concept_name: str):
+        """Removes the INTERESTED_IN relationship between User and Concept."""
+        if not self.driver: return
+
+        query = f"""
+        MATCH (u:{self.LABEL_USER} {{id: $user_id}})-[r:{self.REL_INTERESTED_IN}]->(c:{self.LABEL_CONCEPT} {{name: $name}})
+        DELETE r
+        """
+        try:
+            with self.driver.session() as session:
+                session.run(query, user_id=user_id, name=concept_name)
+        except Exception as e:
+            print(f"Error deleting user interest: {e}")
+
+    def add_category_and_keywords(self, user_id: str, category_name: str, confidence: float, keywords: List[str], source_type: str = "ai_inferred"):
+        """
+        Adds a category and its keywords to the user's interest graph.
+        User -> INTERESTED_IN -> Concept
+        User -> INTERESTED_IN -> Keyword
+        Keyword -> BELONGS_TO -> Concept
+        """
+        if not self.driver: return
+
+        self.add_user_interest(user_id, category_name, confidence, source_type)
+
+        if not keywords:
+            return
+
+        query = f"""
+        MATCH (u:{self.LABEL_USER} {{id: $user_id}})
+        MATCH (c:{self.LABEL_CONCEPT} {{name: $category_name}})
+
+        UNWIND $keywords as kw
+        MERGE (k:{self.LABEL_KEYWORD} {{name: kw}})
+
+        // Link User to Keyword
+        MERGE (u)-[r1:{self.REL_INTERESTED_IN}]->(k)
+        SET r1.confidence = $confidence, r1.source_type = $source_type, r1.updated_at = datetime()
+
+        // Link Keyword to Concept
+        MERGE (k)-[r2:{self.REL_BELONGS_TO}]->(c)
+        """
+        try:
+            with self.driver.session() as session:
+                session.run(query, user_id=user_id, category_name=category_name, keywords=keywords, confidence=confidence, source_type=source_type)
+        except Exception as e:
+            print(f"Error adding structured interests: {e}")
+
     def add_hypothesis(self, text: str, evidence_ids: List[str] = None, properties: Dict[str, Any] = None):
         """Adds a Hypothesis node."""
         if not self.driver: return
@@ -140,6 +190,92 @@ class GraphManager:
         except Exception as e:
             print(f"Error retrieving user interests: {e}")
         return results
+
+    def get_central_concepts(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Retrieves 'Hub' concepts for the user based on degree centrality.
+        These concepts are connected to many other nodes (Hypotheses, Keywords, etc.)
+        and serve as good starting points for exploration.
+        """
+        if not self.driver: return []
+
+        # Cypher Query Logic:
+        # 1. Match Concepts that the user is interested in.
+        # 2. Calculate the 'degree' (number of connections) for each Concept.
+        #    Note: We count all relationships ((c)--()) to capture links to Hypotheses, Keywords, etc.
+        # 3. Return the top N concepts with the highest degree.
+        query = f"""
+        MATCH (u:{self.LABEL_USER} {{id: $user_id}})-[:{self.REL_INTERESTED_IN}]->(c:{self.LABEL_CONCEPT})
+
+        // Calculate the degree using COUNT subquery (escaped for f-string)
+        WITH c, COUNT {{ (c)--() }} as degree
+
+        WHERE degree > 0
+        RETURN c.name as name, degree
+        ORDER BY degree DESC
+        LIMIT $limit
+        """
+
+        results = []
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, user_id=user_id, limit=limit)
+                for record in result:
+                    results.append(record.data())
+        except Exception as e:
+            print(f"Error retrieving central concepts: {e}")
+
+        return results
+
+    def get_node_neighbors(self, user_id: str, node_id: str) -> Dict[str, List[Any]]:
+        """
+        Retrieves immediate neighbors of a specific node.
+        Used for 'expanding' a node in the UI.
+        """
+        if not self.driver: return {"nodes": [], "edges": []}
+
+        # 特定のユーザーに関連するグラフ内でのみ探索するように制約をかける
+        # (他人のデータや無関係なパブリックデータが混ざらないように)
+        query = f"""
+        MATCH (u:{self.LABEL_USER} {{id: $user_id}})
+        MATCH (center) WHERE center.name = $node_id
+
+        // ユーザーのグラフに関連しているか確認（パスが存在するか）
+        // ※厳密すぎると出ない場合があるので、一旦center起点で探索し、
+        //   必要であればユーザーフィルタを追加する方針でも可。
+        //   ここではシンプルに center と隣接ノードを取得。
+
+        MATCH (center)-[r]-(neighbor)
+        RETURN
+            {{id: center.name, label: center.name, labels: labels(center), properties: properties(center)}} as center_node,
+            {{source: startNode(r).name, target: endNode(r).name, label: type(r)}} as edge_data,
+            {{id: neighbor.name, label: neighbor.name, labels: labels(neighbor), properties: properties(neighbor)}} as neighbor_node
+        LIMIT 50
+        """
+
+        nodes_map = {}
+        edges_list = []
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, user_id=user_id, node_id=node_id)
+                for record in result:
+                    # ノードの重複排除
+                    c_node = record["center_node"]
+                    n_node = record["neighbor_node"]
+                    nodes_map[c_node["id"]] = c_node
+                    nodes_map[n_node["id"]] = n_node
+
+                    # エッジの追加
+                    edges_list.append(record["edge_data"])
+
+        except Exception as e:
+            print(f"Error getting neighbors: {e}")
+
+        return {
+            "nodes": list(nodes_map.values()),
+            "edges": edges_list
+        }
 
     def clear_database(self):
         """Clears the entire graph (Use with caution!)."""

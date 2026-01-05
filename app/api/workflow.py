@@ -1,6 +1,9 @@
 from typing import TypedDict, Dict, Any, List, Optional
 from langgraph.graph import StateGraph, END
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Existing components
 from app.api.components.situation_analyzer import SituationAnalyzer
@@ -192,7 +195,7 @@ class WorkflowManager:
                         current_category = predicted_category
                         interest_profile["current_category"] = current_category
             except Exception as e:
-                print(f"Topic prediction failed in situation analysis: {e}")
+                logger.warning(f"Topic prediction failed in situation analysis: {e}")
 
             # Fallback if still invalid
             if not current_category or current_category == "General":

@@ -6,6 +6,7 @@ import logging
 import os
 from dotenv import load_dotenv
 import redis
+import hashlib
 
 # .env ファイルを読み込む
 load_dotenv()
@@ -15,6 +16,8 @@ from app.api.db import DBClient
 from app.api.workflow import WorkflowManager
 from app.api.state_manager import StateManager
 from app.api.components.knowledge_manager import KnowledgeManager
+from app.api.components.graph_manager import GraphManager
+from app.api.components.topic_client import TopicClient
 from app.tasks.analysis import run_workflow_task, process_capture_task, process_document_task
 from pydantic import BaseModel, Field, HttpUrl
 import requests
@@ -148,6 +151,76 @@ async def get_innovation_history(user_id: str = Query(..., description="User ID"
     repo = DBClient()
     history = repo.get_innovation_history(user_id, limit)
     return {"history": history}
+
+@app.get("/api/v1/dashboard/knowledge-graph")
+async def get_knowledge_graph(user_id: str = Query(..., description="User ID"), limit: int = 15):
+    """
+    Retrieves the user's central concepts as a knowledge graph structure.
+    """
+    graph_manager = GraphManager()
+
+    # 1. Get Central Concepts
+    concepts = graph_manager.get_central_concepts(user_id, limit=limit)
+
+    # 2. Convert to Nodes and Edges format for UI
+    nodes = []
+    edges = []
+
+    # Simple color scheme
+    CONCEPT_COLOR = "#5DADE2"
+
+    for concept in concepts:
+        name = concept.get("name")
+        degree = concept.get("degree", 1)
+
+        # Scale size based on degree (min 15, max 50 approximately)
+        size = 15 + min(degree * 2, 35)
+
+        nodes.append({
+            "id": name,
+            "label": name,
+            "size": size,
+            "color": CONCEPT_COLOR,
+            "type": "Concept"
+        })
+
+        # Optionally, we could add edges between these top concepts if they exist
+        # For now, we return just the nodes as 'Hubs'
+
+    # Use 'nodes' and 'edges' keys to match UI expectations
+    return {"nodes": nodes, "edges": edges}
+
+@app.get("/api/v1/dashboard/knowledge-graph/neighbors")
+async def get_graph_neighbors(user_id: str = Query(..., description="User ID"), node_id: str = Query(..., description="Target Node ID")):
+    """
+    Retrieves neighbors for a specific node to support progressive expansion.
+    """
+    graph_manager = GraphManager()
+    data = graph_manager.get_node_neighbors(user_id, node_id)
+
+    # UI向けのフォーマット変換
+    nodes = []
+    for n in data["nodes"]:
+        # Neo4jのlabelsリストから代表ラベル（Concept, Keyword等）を決定
+        # 優先度: User > Hypothesis > Concept > Keyword > ...
+        lbls = n.get("labels", [])
+        node_type = "Concept" # Default
+        if "User" in lbls: node_type = "User"
+        elif "Hypothesis" in lbls: node_type = "Hypothesis"
+        elif "Keyword" in lbls: node_type = "Keyword"
+        elif "Document" in lbls: node_type = "Document"
+
+        # プロパティをマージしてフロントエンドに渡す
+        node_data = {
+            "id": n["id"],
+            "label": n["label"],
+            "type": node_type,
+            "labels": lbls,
+            "properties": n.get("properties", {})  # 本文やメタデータを含む
+        }
+        nodes.append(node_data)
+
+    return {"nodes": nodes, "edges": data["edges"]}
 
 from fastapi.responses import StreamingResponse
 
@@ -326,6 +399,7 @@ async def line_auth(request: LineAuthRequest):
 async def upload_user_file(
     user_id: str = Form(...),
     title: str = Form(...),
+    is_public: bool = Form(False),
     file: UploadFile = File(...)
 ):
     """
@@ -333,6 +407,15 @@ async def upload_user_file(
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    # Check for duplicates using hash
+    repo = DBClient()
+    content = await file.read()
+    file_hash = hashlib.sha256(content).hexdigest()
+
+    # Check if duplicate exists
+    if repo.check_file_exists(user_id, file_hash):
+        raise HTTPException(status_code=400, detail="このファイルは既に登録されています。")
 
     # Generate unique ID for the file
     file_id = str(uuid.uuid4())
@@ -348,23 +431,24 @@ async def upload_user_file(
 
     # Save file to disk
     try:
+        # Since we already read the content, we can just write it.
+        # But aiofiles expects async write.
         async with aiofiles.open(file_path, 'wb') as out_file:
-            content = await file.read()
             await out_file.write(content)
     except Exception as e:
         logger.error(f"File save failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to save file.")
 
     # Insert into MySQL
-    repo = DBClient()
-    if not repo.insert_user_file(user_id, file.filename, file_path, title):
+    db_file_id = repo.insert_user_file(user_id, file.filename, file_path, title, file_hash, is_public)
+    if not db_file_id:
         # Cleanup file if DB fails
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=500, detail="Database insertion failed.")
 
     # Trigger Background Task
-    task = process_document_task.delay(user_id, file_path, title, file_id)
+    task = process_document_task.delay(user_id, file_path, title, file_id, db_file_id)
 
     return {
         "status": "uploaded",
@@ -373,6 +457,94 @@ async def upload_user_file(
         "message": "File uploaded and processing started."
     }
 
+
+class ContentFeedbackRequest(BaseModel):
+    user_id: str
+    content_id: int
+    content_type: str # 'file' or 'capture'
+    new_categories: List[str]
+    text_to_learn: Optional[str] = None # Text content to use for learning
+
+class ConversationFeedbackRequest(BaseModel):
+    user_id: str
+    new_category: str
+    summary_to_learn: Optional[str] = None
+
+@app.post("/api/v1/feedback/content")
+async def feedback_content(request: ContentFeedbackRequest):
+    repo = DBClient()
+    topic_client = TopicClient()
+    graph_manager = GraphManager()
+
+    # 1. Update Database
+    if request.content_type == 'file':
+        success = repo.update_file_category(request.content_id, request.new_categories, is_verified=True)
+    elif request.content_type == 'capture':
+        # Backward compatibility for captures (single category)
+        primary_category = request.new_categories[0] if request.new_categories else "Uncategorized"
+        success = repo.update_capture_category(request.content_id, primary_category, is_verified=True)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid content_type")
+
+    if not success:
+        raise HTTPException(status_code=500, detail="Database update failed")
+
+    # 2. Learn in Topic Service & Update Graph
+    if request.new_categories:
+        for cat in request.new_categories:
+            if request.text_to_learn:
+                # Truncate text if too long (e.g., 500 chars)
+                text_snippet = request.text_to_learn[:500]
+                topic_client.learn_text(text_snippet, cat)
+
+            # 3. Update Knowledge Graph
+            graph_manager.add_user_interest(
+                user_id=request.user_id,
+                concept_name=cat,
+                confidence=1.0,
+                source_type=graph_manager.SOURCE_USER_STATED
+            )
+
+    return {"status": "success", "message": "Content updated and learned."}
+
+
+@app.post("/api/v1/feedback/conversation")
+async def feedback_conversation(request: ConversationFeedbackRequest):
+    repo = DBClient()
+    topic_client = TopicClient()
+    graph_manager = GraphManager()
+
+    # 1. Update User State (Interest Profile)
+    state = repo.get_user_state(request.user_id)
+    if state:
+        interest_profile = state.get("interest_profile") or {}
+
+        # Update
+        interest_profile["current_category"] = request.new_category
+
+        repo.upsert_user_state(request.user_id, interest_profile, state.get("active_hypotheses") or {})
+
+        # 2. Learn
+        if request.summary_to_learn:
+             topic_client.learn_text(request.summary_to_learn, request.new_category)
+
+        # 3. Update Graph
+        graph_manager.add_user_interest(
+            request.user_id,
+            request.new_category,
+            confidence=1.0,
+            source_type=graph_manager.SOURCE_USER_STATED
+        )
+
+        return {"status": "success", "message": "Conversation context updated."}
+
+    raise HTTPException(status_code=404, detail="User state not found")
+
+@app.get("/api/v1/user-contents")
+async def get_user_contents(user_id: str = Query(..., description="User ID")):
+    repo = DBClient()
+    contents = repo.get_all_user_contents(user_id)
+    return {"contents": contents}
 
 if __name__ == "__main__":
     import uvicorn

@@ -47,22 +47,46 @@ class DBClient:
                 conn.close()
         return user_id
 
-    def insert_user_file(self, user_id: str, file_name: str, file_path: str, title: str) -> bool:
+    def check_file_exists(self, user_id: str, file_hash: str) -> bool:
         """
-        Inserts a record for an uploaded user file.
+        Check if the file already exists for the user or is public.
         """
         conn = None
         cursor = None
         try:
             conn = mysql.connector.connect(**self.config)
             cursor = conn.cursor()
-            query = "INSERT INTO user_files (user_id, file_name, file_path, title) VALUES (%s, %s, %s, %s)"
-            cursor.execute(query, (user_id, file_name, file_path, title))
+            query = """
+                SELECT id FROM user_files
+                WHERE (user_id = %s AND file_hash = %s)
+                   OR (is_public = 1 AND file_hash = %s)
+                LIMIT 1
+            """
+            cursor.execute(query, (user_id, file_hash, file_hash))
+            return cursor.fetchone() is not None
+        except mysql.connector.Error as err:
+            print(f"[✗] MySQL Error in check_file_exists: {err}")
+            return False
+        finally:
+            if cursor: cursor.close()
+            if conn: conn.close()
+
+    def insert_user_file(self, user_id: str, file_name: str, file_path: str, title: str, file_hash: str, is_public: bool) -> Optional[int]:
+        """
+        Inserts a record for an uploaded user file and returns the ID.
+        """
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.config)
+            cursor = conn.cursor()
+            query = "INSERT INTO user_files (user_id, file_name, file_path, title, file_hash, is_public) VALUES (%s, %s, %s, %s, %s, %s)"
+            cursor.execute(query, (user_id, file_name, file_path, title, file_hash, int(is_public)))
             conn.commit()
-            return True
+            return cursor.lastrowid
         except mysql.connector.Error as err:
             print(f"[✗] MySQL Error: {err}")
-            return False
+            return None
         finally:
             if cursor:
                 cursor.close()
@@ -448,3 +472,186 @@ class DBClient:
                 cursor.close()
             if conn:
                 conn.close()
+
+    def add_file_categories(self, file_id: int, categories: List[str], conn=None, cursor=None) -> bool:
+        """Adds categories to a file."""
+        if not categories:
+            return True
+
+        # If no connection provided, create new (safe fallback, but transactional use is preferred)
+        local_conn = False
+        if not conn:
+            try:
+                conn = mysql.connector.connect(**self.config)
+                cursor = conn.cursor()
+                local_conn = True
+            except mysql.connector.Error as err:
+                print(f"[✗] MySQL Error in add_file_categories connection: {err}")
+                return False
+
+        try:
+            query = "INSERT IGNORE INTO file_categories (file_id, category_name) VALUES (%s, %s)"
+            data = [(file_id, cat) for cat in categories]
+            cursor.executemany(query, data)
+            if local_conn:
+                conn.commit()
+            return True
+        except mysql.connector.Error as err:
+            print(f"[✗] MySQL Error in add_file_categories: {err}")
+            return False
+        finally:
+            if local_conn:
+                if cursor: cursor.close()
+                if conn: conn.close()
+
+    def delete_file_categories(self, file_id: int, conn=None, cursor=None) -> bool:
+        """Deletes all categories for a file."""
+        local_conn = False
+        if not conn:
+            try:
+                conn = mysql.connector.connect(**self.config)
+                cursor = conn.cursor()
+                local_conn = True
+            except mysql.connector.Error as err:
+                print(f"[✗] MySQL Error in delete_file_categories connection: {err}")
+                return False
+
+        try:
+            query = "DELETE FROM file_categories WHERE file_id = %s"
+            cursor.execute(query, (file_id,))
+            if local_conn:
+                conn.commit()
+            return True
+        except mysql.connector.Error as err:
+            print(f"[✗] MySQL Error in delete_file_categories: {err}")
+            return False
+        finally:
+            if local_conn:
+                if cursor: cursor.close()
+                if conn: conn.close()
+
+    def update_file_category(self, file_id: int, categories: List[str], is_verified: bool = True) -> bool:
+        """
+        Updates categories for a file by deleting existing ones and inserting new ones.
+        Also marks the file as verified.
+        Executes within a single transaction.
+        """
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.config)
+            # Start transaction (autocommit is False by default in mysql-connector if using transactions,
+            # but explicit start_transaction ensures it)
+            conn.start_transaction()
+            cursor = conn.cursor()
+
+            # 1. Update verification status
+            query_update = "UPDATE user_files SET is_verified = %s WHERE id = %s"
+            cursor.execute(query_update, (is_verified, file_id))
+
+            # 2. Update categories (Delete & Insert)
+            # Pass conn/cursor to reuse the transaction
+            if not self.delete_file_categories(file_id, conn=conn, cursor=cursor):
+                conn.rollback()
+                return False
+
+            if not self.add_file_categories(file_id, categories, conn=conn, cursor=cursor):
+                conn.rollback()
+                return False
+
+            conn.commit()
+            return True
+        except mysql.connector.Error as err:
+            if conn:
+                conn.rollback()
+            print(f"[✗] MySQL Error in update_file_category: {err}")
+            return False
+        finally:
+            if cursor: cursor.close()
+            if conn: conn.close()
+
+    def update_capture_category(self, capture_id: int, category: str, is_verified: bool = True) -> bool:
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.config)
+            cursor = conn.cursor()
+            query = "UPDATE captured_pages SET category = %s, is_verified = %s WHERE id = %s"
+            cursor.execute(query, (category, is_verified, capture_id))
+            conn.commit()
+            return True
+        except mysql.connector.Error as err:
+            print(f"[✗] MySQL Error in update_capture_category: {err}")
+            return False
+        finally:
+            if cursor: cursor.close()
+            if conn: conn.close()
+
+    def get_all_user_contents(self, user_id: str) -> List[Dict[str, Any]]:
+        conn = None
+        cursor = None
+        contents = []
+        try:
+            conn = mysql.connector.connect(**self.config)
+            cursor = conn.cursor(dictionary=True)
+
+            # 1. Files (with aggregated categories)
+            # GROUP_CONCAT returns a comma-separated string of categories.
+            # Using LEFT JOIN to ensure files without categories are still returned.
+            query_files = """
+                SELECT f.id, f.title, f.is_verified, f.created_at, 'file' as type, f.file_name as source,
+                       GROUP_CONCAT(fc.category_name) as category
+                FROM user_files f
+                LEFT JOIN file_categories fc ON f.id = fc.file_id
+                WHERE f.user_id = %s
+                GROUP BY f.id
+            """
+            cursor.execute(query_files, (user_id,))
+            files = cursor.fetchall()
+
+            # Post-process files: convert 'category' string to list
+            for f in files:
+                cat_str = f.get("category")
+                if cat_str:
+                    f["category"] = cat_str.split(",")
+                else:
+                    f["category"] = []
+
+            contents.extend(files)
+
+            # 2. Captured Pages
+            # Keeping as single category but wrapping in list for consistency if needed by UI
+            # or UI handles both list and string.
+            # To unify, we'll convert to list.
+            query_captures = """
+                SELECT id, title, category, is_verified, created_at, 'capture' as type, url as source
+                FROM captured_pages
+                WHERE user_id = %s
+            """
+            cursor.execute(query_captures, (user_id,))
+            captures = cursor.fetchall()
+
+            for c in captures:
+                cat = c.get("category")
+                if cat:
+                    c["category"] = [cat]
+                else:
+                    c["category"] = []
+
+            contents.extend(captures)
+
+            # Sort by created_at DESC
+            contents.sort(key=lambda x: x['created_at'], reverse=True)
+
+            # Format datetime
+            for item in contents:
+                if item.get('created_at'):
+                    item['created_at'] = item['created_at'].isoformat()
+
+            return contents
+        except mysql.connector.Error as err:
+            print(f"[✗] MySQL Error in get_all_user_contents: {err}")
+            return []
+        finally:
+            if cursor: cursor.close()
+            if conn: conn.close()
