@@ -58,7 +58,7 @@ class DBClient:
             cursor = conn.cursor(dictionary=True)
             # Search by file path pattern since UUID is not a column
             query = "SELECT id, user_id, file_path, is_public, title FROM user_files WHERE file_path LIKE %s LIMIT 1"
-            cursor.execute(query, (f"%/{file_id}.pdf",))
+            cursor.execute(query, (f"%{file_id}.pdf",))
             return cursor.fetchone()
         except mysql.connector.Error as err:
             print(f"[✗] MySQL Error in get_file_info_by_uuid: {err}")
