@@ -377,7 +377,40 @@ def render_graph_view():
     )
 
     # 3. インタラクション処理
+    # 状態変数の初期化
+    if "last_clicked_node_id" not in st.session_state:
+        st.session_state["last_clicked_node_id"] = None
+
     if selected_node_id:
+        # --- インタラクションロジック ---
+
+        # 1. 同じノードを連続クリック -> Focus Mode (集中)
+        if selected_node_id == st.session_state["last_clicked_node_id"]:
+            with st.spinner(f"🎯 {selected_node_id} に集中しています..."):
+                neighbors = fetch_neighbors(user_id, selected_node_id)
+                # 既存データを破棄して入れ替え
+                st.session_state["graph_nodes"], st.session_state["graph_edges"] = merge_graph_data(
+                    [], [], neighbors, NODE_STYLES # 空のリストから開始
+                )
+                # 状態をリセットして、再クリックでまた展開などができるようにする（あるいはFocus状態を維持するかは要件次第だが、ここではリセットはしない）
+                st.rerun()
+
+        # 2. 新しいノードをクリック -> Expand Mode (展開)
+        elif selected_node_id != st.session_state["last_clicked_node_id"]:
+            # 状態更新
+            st.session_state["last_clicked_node_id"] = selected_node_id
+
+            # まだグラフに含まれていない隣接情報を追加
+            with st.spinner(f"📡 {selected_node_id} の関連情報を展開中..."):
+                neighbors = fetch_neighbors(user_id, selected_node_id)
+                st.session_state["graph_nodes"], st.session_state["graph_edges"] = merge_graph_data(
+                    st.session_state["graph_nodes"],
+                    st.session_state["graph_edges"],
+                    neighbors,
+                    NODE_STYLES
+                )
+                st.rerun()
+
         # 選択されたノードオブジェクトを探す
         selected_node = next((n for n in st.session_state["graph_nodes"] if n.id == selected_node_id), None)
 
@@ -394,18 +427,6 @@ def render_graph_view():
                 if node_type in ["Concept", "Category"]:
                     if selected_node_id in st.session_state["expanded_nodes"]:
                         st.success("展開済み (Expanded)")
-                    else:
-                        if st.button("📡 関連情報を展開する (Expand)", key=f"expand_{selected_node_id}"):
-                            with st.spinner("関連情報を取得中..."):
-                                neighbors = fetch_neighbors(user_id, selected_node_id)
-                                st.session_state["graph_nodes"], st.session_state["graph_edges"] = merge_graph_data(
-                                    st.session_state["graph_nodes"],
-                                    st.session_state["graph_edges"],
-                                    neighbors,
-                                    NODE_STYLES
-                                )
-                                st.session_state["expanded_nodes"].add(selected_node_id)
-                                st.rerun()
 
                 # B. Leafの場合: 詳細表示
                 elif node_type == "Hypothesis":
