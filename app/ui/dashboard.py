@@ -252,6 +252,14 @@ def render_innovation_zipper(analysis_data):
 
     st.graphviz_chart(graph)
 
+def format_node_label(text: str, max_width: int = 15, max_lines: int = 2) -> str:
+    if not text:
+        return ""
+    words = [text[i:i+max_width] for i in range(0, len(text), max_width)]
+    if len(words) > max_lines:
+        return "\n".join(words[:max_lines]) + "..."
+    return "\n".join(words)
+
 def merge_graph_data(current_nodes, current_edges, new_data, node_styles):
     """既存のグラフデータに新しいデータをマージするヘルパー関数"""
     existing_ids = {n.id for n in current_nodes}
@@ -280,12 +288,24 @@ def merge_graph_data(current_nodes, current_edges, new_data, node_styles):
             color = n.get("color") or style["color"]
             size = n.get("size") or style["size"]
 
+            # プロパティから画像URLを取得
+            image_url = n.get("properties", {}).get("image")
+
+            # 画像URLがある場合のみ shape="image" を許可
+            if image_url:
+                node_shape = "image"
+                image_path = image_url
+            else:
+                node_shape = style.get("shape", "dot")
+                image_path = None
+
             current_nodes.append(Node(
                 id=n["id"],
-                label=n["label"],
+                label=format_node_label(n["label"]),
                 size=size,
                 color=color,
-                shape=style.get("shape", "dot"),
+                shape=node_shape,
+                image=image_path,
                 title=n.get("label"),
                 type=node_type,
                 properties=n.get("properties", {})
@@ -340,7 +360,11 @@ def render_graph_view():
         nodeHighlightBehavior=True,
         highlightColor="#F7A7A6",
         collapsible=False,
-        node={"labelProperty": "label"},
+        node={
+            "labelProperty": "label",
+            "renderLabel": True,
+            "shape": "dot"
+        },
         link={"labelProperty": "type", "renderLabel": False}
     )
 
