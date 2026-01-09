@@ -404,19 +404,13 @@ def render_graph_view():
     if selected_node_id:
         # --- インタラクションロジック ---
 
-        # 1. 同じノードを連続クリック -> Focus Mode (集中)
-        if selected_node_id == st.session_state["last_clicked_node_id"]:
-            with st.spinner(f"🎯 {selected_node_id} に集中しています..."):
-                neighbors = fetch_neighbors(user_id, selected_node_id)
-                # 既存データを破棄して入れ替え
-                st.session_state["graph_nodes"], st.session_state["graph_edges"] = merge_graph_data(
-                    [], [], neighbors, NODE_STYLES # 空のリストから開始
-                )
-                # 状態をリセットして、再クリックでまた展開などができるようにする（あるいはFocus状態を維持するかは要件次第だが、ここではリセットはしない）
-                st.rerun()
+        # [FIX] 無限ループの原因となるため、自動Focusロジックを削除
+        # 以前のコード:
+        # if selected_node_id == st.session_state["last_clicked_node_id"]:
+        #     ... st.rerun() ...
 
-        # 2. 新しいノードをクリック -> Expand Mode (展開)
-        elif selected_node_id != st.session_state["last_clicked_node_id"]:
+        # 新しいノードをクリック -> Expand Mode (展開)
+        if selected_node_id != st.session_state["last_clicked_node_id"]:
             # 状態更新
             st.session_state["last_clicked_node_id"] = selected_node_id
 
@@ -442,6 +436,16 @@ def render_graph_view():
             with st.sidebar:
                 st.header(f"Selected: {selected_node.label}")
                 st.markdown(f"Type: **{node_type}**")
+
+                # [FIX] Focus機能をボタンとして実装（ループ回避のため）
+                if st.button("🎯 このノードに集中する (Focus)"):
+                    with st.spinner(f"🎯 {selected_node_id} に集中しています..."):
+                        neighbors = fetch_neighbors(user_id, selected_node_id)
+                        # 既存データを破棄して入れ替え
+                        st.session_state["graph_nodes"], st.session_state["graph_edges"] = merge_graph_data(
+                            [], [], neighbors, NODE_STYLES
+                        )
+                        st.rerun()
 
                 # A. Hubの場合: 展開/収納
                 if node_type in ["Concept", "Category"]:
