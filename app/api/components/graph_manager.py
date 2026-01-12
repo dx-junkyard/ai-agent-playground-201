@@ -318,7 +318,7 @@ class GraphManager:
         # elementId()はNeo4j 5.x以降で推奨される一意な識別子取得関数です
         query = f"""
         MATCH (u:{self.LABEL_USER} {{id: $user_id}})
-        MATCH (center) WHERE center.name = $node_id
+        MATCH (center) WHERE center.name = $node_id OR center.text = $node_id
 
         MATCH (center)-[r]-(neighbor)
         RETURN
