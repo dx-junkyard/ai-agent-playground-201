@@ -368,6 +368,25 @@ def merge_graph_data(current_nodes, current_edges, new_data, node_styles):
 
     return current_nodes, current_edges
 
+def get_file_url(file_id, raw_url=None):
+    """Helper to get public file URL"""
+    pdf_url = None
+    if file_id:
+        # Fetch presigned URL from API and convert to public URL
+        api_target = f"{API_URL}/user-files/{file_id}/content"
+        try:
+            res = requests.get(api_target)
+            if res.status_code == 200:
+                data = res.json()
+                raw_signed_url = data.get("url")
+                if raw_signed_url:
+                    pdf_url = raw_signed_url
+        except Exception:
+            pass
+    elif raw_url:
+        pdf_url = raw_url
+    return pdf_url
+
 def render_graph_view():
     st.subheader("Explore your Interest Graph")
     user_id = st.session_state.get("user_id")
@@ -461,6 +480,21 @@ def render_graph_view():
         if selected_node:
             node_type = getattr(selected_node, "type", "Concept")
 
+            # Helper to find neighbors in current graph
+            current_node_neighbors = []
+            for e in st.session_state["graph_edges"]:
+                source_id = getattr(e, "source", None) or e.__dict__.get("source")
+                target_id = getattr(e, "target", None) or e.__dict__.get("target")
+
+                if source_id == selected_node.id:
+                    # Target is neighbor
+                    neighbor = next((n for n in st.session_state["graph_nodes"] if n.id == target_id), None)
+                    if neighbor: current_node_neighbors.append(neighbor)
+                elif target_id == selected_node.id:
+                    # Source is neighbor
+                    neighbor = next((n for n in st.session_state["graph_nodes"] if n.id == source_id), None)
+                    if neighbor: current_node_neighbors.append(neighbor)
+
             # --- ACTION PANEL ---
             with st.sidebar:
                 st.header(f"Selected: {selected_node.label}")
@@ -496,36 +530,54 @@ def render_graph_view():
                     file_id = props.get("file_id")
                     raw_url = props.get("url", "")
 
-                    pdf_url = None
-                    if file_id:
-                        # Fetch presigned URL from API and convert to public URL
-                        api_target = f"{API_URL}/user-files/{file_id}/content"
-                        try:
-                            res = requests.get(api_target)
-                            if res.status_code == 200:
-                                data = res.json()
-                                raw_signed_url = data.get("url")
-                                if raw_signed_url:
-                                    # 削除: 文字列置換ロジックは不要になりました
-                                    # if pdf_url:
-                                    #    pdf_url = pdf_url.replace(settings.S3_ENDPOINT_URL, settings.S3_PUBLIC_ENDPOINT_URL)
-                                    pdf_url = raw_signed_url
-                                else:
-                                    st.warning("File URL not found in API response.")
-                            else:
-                                st.error(f"Failed to fetch file URL (Status: {res.status_code})")
-                        except Exception as e:
-                            st.error(f"Error connecting to API: {e}")
-                    elif raw_url:
-                        # Backward compatibility or fallback
-                        pdf_url = raw_url
+                    pdf_url = get_file_url(file_id, raw_url)
 
                     if pdf_url:
                         st.link_button("🔗 ファイルを開く (Open File)", pdf_url)
                         st.markdown(f'<iframe src="{pdf_url}" width="100%" height="600" type="application/pdf"></iframe>', unsafe_allow_html=True)
+                    else:
+                        st.warning("ファイルURLを取得できませんでした。")
 
                     if "summary" in props:
                         st.caption(props["summary"])
+
+                    # Show related Keywords
+                    related_kws = [n for n in current_node_neighbors if getattr(n, "type", "") == "Keyword"]
+                    if related_kws:
+                        st.markdown("**🔑 関連キーワード:**")
+                        st.write(", ".join([n.label for n in related_kws]))
+
+                    # Show related Categories
+                    related_cats = [n for n in current_node_neighbors if getattr(n, "type", "") in ["Concept", "Category"]]
+                    if related_cats:
+                        st.markdown("**🏷️ 関連カテゴリ:**")
+                        st.write(", ".join([n.label for n in related_cats]))
+
+                elif node_type == "Keyword":
+                    st.markdown(f"### 🔑 {selected_node.label}")
+
+                    # Show related Documents
+                    related_docs = [n for n in current_node_neighbors if getattr(n, "type", "") == "Document"]
+                    if related_docs:
+                        st.markdown("**📂 関連ドキュメント:**")
+                        for doc in related_docs:
+                            doc_props = getattr(doc, "properties", {})
+                            doc_title = doc_props.get("title", doc.label)
+
+                            file_id = doc_props.get("file_id")
+                            raw_url = doc_props.get("url", "")
+                            doc_url = get_file_url(file_id, raw_url)
+
+                            if doc_url:
+                                st.markdown(f"- [{doc_title}]({doc_url})")
+                            else:
+                                st.write(f"- {doc_title}")
+
+                    # Show related Categories
+                    related_cats = [n for n in current_node_neighbors if getattr(n, "type", "") in ["Concept", "Category"]]
+                    if related_cats:
+                        st.markdown("**🏷️ 関連カテゴリ:**")
+                        st.write(", ".join([c.label for c in related_cats]))
 
                 st.divider()
                 if st.button("🧪 構造分解する", key=f"analyze_{selected_node_id}"):

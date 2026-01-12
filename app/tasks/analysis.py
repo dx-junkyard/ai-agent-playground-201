@@ -291,9 +291,9 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
                     with open(categories_path, 'r', encoding='utf-8') as f:
                         cats_data = json.load(f)
                         for main_cat, data in cats_data.items():
-                            blocklist.add(main_cat)
+                            blocklist.add(main_cat.lower())
                             for sub in data.get("subcategories", []):
-                                blocklist.add(sub.get("category"))
+                                blocklist.add(sub.get("category").lower())
 
                 # LLM Extraction
                 prompt_path = os.path.join(os.path.dirname(__file__), "../static/prompts/keyword_extraction.txt")
@@ -306,11 +306,19 @@ def process_document_task(user_id: str, file_path: str, title: str, file_id: str
 
                 raw_keywords = kw_result.get("keywords", []) if kw_result else []
 
-                # Filter keywords
-                extracted_keywords = [
-                    k for k in raw_keywords
-                    if k not in blocklist and len(k) > 1
-                ]
+                # Filter keywords: Deduplicate and blocklist check (Case Insensitive)
+                unique_keywords = []
+                seen = set()
+
+                for k in raw_keywords:
+                    k_clean = k.strip()
+                    k_lower = k_clean.lower()
+
+                    if len(k_clean) > 1 and k_lower not in blocklist and k_lower not in seen:
+                        unique_keywords.append(k_clean)
+                        seen.add(k_lower)
+
+                extracted_keywords = unique_keywords[:10]
 
                 logger.info(f"Extracted Keywords for {title}: {extracted_keywords}")
 
