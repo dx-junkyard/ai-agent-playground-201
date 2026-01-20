@@ -1,0 +1,16 @@
+Context:
+User Goal: {user_goal}
+Page Title: {page_title}
+Active Hypotheses: {active_hypotheses}
+Retrieval Evidence: {retrieval_evidence}
+Knowledge Gaps: {knowledge_gaps}
+Hypotheses: {hypotheses}
+
+Generate a response plan.
+Format:
+{{
+  "response_plan": {{
+     "thought_process": "...",
+     "message": "..."
+  }}
+}}

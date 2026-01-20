@@ -583,12 +583,12 @@ def generate_hot_cache_task(user_id: str):
             try:
                 embedding = ai_client.get_embedding(query_text)
                 if embedding and knowledge_manager.qdrant_client.collection_exists(knowledge_manager.collection_name):
-                    results = knowledge_manager.qdrant_client.search(
+                    results = knowledge_manager.qdrant_client.query_points(
                         collection_name=knowledge_manager.collection_name,
-                        query_vector=embedding,
+                        query=embedding,
                         limit=3,
                         query_filter=None # We could filter by user_id here but keeping it broad for context
-                    )
+                    ).points
                     memories = [point.payload.get("content", "") for point in results if point.payload]
             except Exception as e:
                 logger.warning(f"Failed to fetch related memories: {e}")
