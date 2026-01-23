@@ -53,6 +53,11 @@ services:
     volumes:
       - ./services/ui/src:/app
       - ./topic-service:/app/topic-service
+    environment:
+      - API_URL=http://api:8000/api/v1/chat/stream
+      - LINE_CHANNEL_ID=${LINE_CHANNEL_ID}
+      - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
+      - LINE_REDIRECT_URI=${LINE_REDIRECT_URI}
     networks:
       - app-network
 
