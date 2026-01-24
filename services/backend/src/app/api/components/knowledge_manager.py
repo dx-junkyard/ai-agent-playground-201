@@ -65,10 +65,18 @@ class KnowledgeManager:
     def _setup_qdrant_collection(self):
         """Create Qdrant collection if it doesn't exist."""
         if not self.qdrant_client.collection_exists(self.collection_name):
-            self.qdrant_client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
-            )
+            try:
+                self.qdrant_client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
+                )
+            except Exception as e:
+                # Ignore concurrent creation errors
+                if "already exists" in str(e) or "Conflict" in str(e):
+                    pass
+                else:
+                    print(f"[!] Failed to create collection: {e}")
+                    raise e
 
     def add_user_memory(self, user_id: str, content: str, memory_type: str = "user_hypothesis", category: str = None, meta: Dict[str, Any] = None) -> bool:
         """
@@ -197,8 +205,13 @@ class KnowledgeManager:
             title = item.get("title", "")
 
             # Generate ID
-            item_id = item.get("id")
-            if not item_id:
+            raw_id = item.get("id")
+            if raw_id:
+                # Always convert to UUID to handle non-UUID string IDs (like "234")
+                unique_str = f"{source}:{raw_id}"
+                md5_hash = hashlib.md5(unique_str.encode()).hexdigest()
+                item_id = str(uuid.UUID(hex=md5_hash))
+            else:
                 # Deterministic ID based on content hash
                 unique_str = f"{source}:{title}:{content[:100]}"
                 md5_hash = hashlib.md5(unique_str.encode()).hexdigest()
