@@ -821,7 +821,38 @@ from config import MODEL_HYPOTHESIS_GENERATION
 
 
 # Chrome拡張ダウンロードエンドポイント
-EXTENSION_ZIP_PATH = Path(__file__).resolve().parents[5] / "extension/team-brain-extension.zip"
+# Docker環境と開発環境の両方に対応するパス解決
+def _get_extension_zip_path() -> Optional[Path]:
+    """拡張機能のzipファイルパスを取得（環境変数または自動検出）"""
+    # 環境変数で明示的に指定されている場合
+    env_path = os.environ.get("EXTENSION_ZIP_PATH")
+    if env_path:
+        return Path(env_path)
+
+    # 開発環境: main.pyから相対パスで辿る
+    try:
+        current_file = Path(__file__).resolve()
+        # services/backend/src/app/api/main.py -> プロジェクトルート
+        for i in range(len(current_file.parents)):
+            candidate = current_file.parents[i] / "extension/team-brain-extension.zip"
+            if candidate.exists():
+                return candidate
+    except (IndexError, Exception):
+        pass
+
+    # Docker環境: マウントされた固定パスをチェック
+    docker_paths = [
+        Path("/app/extension/team-brain-extension.zip"),
+        Path("/extension/team-brain-extension.zip"),
+    ]
+    for p in docker_paths:
+        if p.exists():
+            return p
+
+    return None
+
+
+EXTENSION_ZIP_PATH = _get_extension_zip_path()
 
 
 @app.get("/api/v1/extension/download")
@@ -829,7 +860,7 @@ async def download_extension():
     """
     ビルド済みのChrome拡張をダウンロードする。
     """
-    if not EXTENSION_ZIP_PATH.exists():
+    if EXTENSION_ZIP_PATH is None or not EXTENSION_ZIP_PATH.exists():
         raise HTTPException(
             status_code=404,
             detail="拡張機能がまだビルドされていません。'npm run build:extension' を実行してください。"
@@ -847,7 +878,7 @@ async def get_extension_info():
     """
     Chrome拡張の情報とインストール手順を取得する。
     """
-    is_available = EXTENSION_ZIP_PATH.exists()
+    is_available = EXTENSION_ZIP_PATH is not None and EXTENSION_ZIP_PATH.exists()
 
     return {
         "available": is_available,
