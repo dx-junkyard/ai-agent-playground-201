@@ -6,11 +6,14 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "contextMenus"
   ],
   "host_permissions": [
-    "http://localhost:8086/*",
-    "http://127.0.0.1:8086/*"
+    "http://localhost:*/*",
+    "http://127.0.0.1:*/*",
+    "https://*/*",
+    "http://*/*"
   ],
   "action": {
     "default_popup": "src/popup.html",

@@ -3,12 +3,16 @@
  *
  * ページ内容を解析し、AIによる仮説ドラフトを生成して
  * フォームに自動入力する機能を提供します。
+ *
+ * 認証: WebアプリのセッションCookieを共有して認証します。
  */
 
-// デフォルト設定
-const DEFAULT_SETTINGS = {
-  apiUrl: 'http://localhost:8086',
-  userId: 'extension-user'
+// config.jsから設定を取得（動的に注入される）
+const CONFIG = window.TEAM_BRAIN_CONFIG || {
+  API_URL: 'http://localhost:8086',
+  WEB_APP_URL: 'http://localhost:8080',
+  LINE_CHANNEL_ID: '',
+  DEBUG: true
 };
 
 // DOM要素の参照
@@ -32,24 +36,95 @@ const elements = {
   apiUrlInput: document.getElementById('api-url'),
   userIdInput: document.getElementById('user-id'),
   settingsCancel: document.getElementById('settings-cancel'),
-  settingsSave: document.getElementById('settings-save')
+  settingsSave: document.getElementById('settings-save'),
+  loginRequired: document.getElementById('login-required'),
+  loginBtn: document.getElementById('login-btn')
 };
 
 // 現在のページ情報を保持
 let currentPageData = null;
 
+// 認証済みユーザーID
+let authenticatedUserId = null;
+
+/**
+ * デバッグログ
+ */
+function debugLog(...args) {
+  if (CONFIG.DEBUG) {
+    console.log('[Team Brain]', ...args);
+  }
+}
+
 /**
  * 初期化処理
  */
 async function initialize() {
+  debugLog('Initializing with config:', CONFIG);
+
   // 設定を読み込み
   await loadSettings();
 
   // イベントリスナーを設定
   setupEventListeners();
 
-  // ページ内容を取得して解析
-  await analyzeCurrentPage();
+  // 認証状態を確認
+  const isAuthenticated = await checkAuthStatus();
+
+  if (isAuthenticated) {
+    // ページ内容を取得して解析
+    await analyzeCurrentPage();
+  } else {
+    // ログイン誘導を表示
+    showState('login-required');
+  }
+}
+
+/**
+ * 認証状態を確認（セッションCookieを使用）
+ */
+async function checkAuthStatus() {
+  try {
+    const apiUrl = elements.apiUrlInput.value.trim() || CONFIG.API_URL;
+
+    // セッションCookieを含めてAPIに認証確認リクエスト
+    const response = await fetch(`${apiUrl}/api/v1/auth/session`, {
+      method: 'GET',
+      credentials: 'include',  // セッションCookieを送信
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data.user_id) {
+        authenticatedUserId = data.user_id;
+        debugLog('Authenticated as:', authenticatedUserId);
+        return true;
+      }
+    }
+
+    // セッションがない場合、ストレージからユーザーIDを取得（フォールバック）
+    const result = await chrome.storage.local.get(['userId']);
+    if (result.userId && result.userId !== 'extension-user') {
+      authenticatedUserId = result.userId;
+      debugLog('Using stored user ID:', authenticatedUserId);
+      return true;
+    }
+
+    debugLog('Not authenticated');
+    return false;
+  } catch (error) {
+    debugLog('Auth check failed:', error);
+    // エラー時はストレージの設定を使用
+    const result = await chrome.storage.local.get(['userId']);
+    if (result.userId) {
+      authenticatedUserId = result.userId;
+      return true;
+    }
+    return false;
+  }
 }
 
 /**
@@ -58,10 +133,12 @@ async function initialize() {
 async function loadSettings() {
   try {
     const result = await chrome.storage.local.get(['apiUrl', 'userId']);
-    elements.apiUrlInput.value = result.apiUrl || DEFAULT_SETTINGS.apiUrl;
-    elements.userIdInput.value = result.userId || DEFAULT_SETTINGS.userId;
+    // config.jsの設定を優先、ストレージはオーバーライド用
+    elements.apiUrlInput.value = result.apiUrl || CONFIG.API_URL;
+    elements.userIdInput.value = result.userId || '';
   } catch (error) {
     console.error('Failed to load settings:', error);
+    elements.apiUrlInput.value = CONFIG.API_URL;
   }
 }
 
@@ -69,12 +146,18 @@ async function loadSettings() {
  * 設定を保存する
  */
 async function saveSettings() {
-  const apiUrl = elements.apiUrlInput.value.trim() || DEFAULT_SETTINGS.apiUrl;
-  const userId = elements.userIdInput.value.trim() || DEFAULT_SETTINGS.userId;
+  const apiUrl = elements.apiUrlInput.value.trim() || CONFIG.API_URL;
+  const userId = elements.userIdInput.value.trim();
 
   try {
     await chrome.storage.local.set({ apiUrl, userId });
     hideSettingsModal();
+
+    // ユーザーIDが設定されていれば認証済みとする
+    if (userId) {
+      authenticatedUserId = userId;
+    }
+
     // 設定変更後に再解析
     await analyzeCurrentPage();
   } catch (error) {
@@ -99,6 +182,11 @@ function setupEventListeners() {
   // 閉じるボタン
   elements.closeBtn.addEventListener('click', () => window.close());
 
+  // ログインボタン
+  if (elements.loginBtn) {
+    elements.loginBtn.addEventListener('click', handleLogin);
+  }
+
   // 設定ボタン
   elements.settingsBtn.addEventListener('click', showSettingsModal);
   elements.settingsCancel.addEventListener('click', hideSettingsModal);
@@ -110,6 +198,16 @@ function setupEventListeners() {
       hideSettingsModal();
     }
   });
+}
+
+/**
+ * ログイン処理 - WebアプリのログインページをChrome内で開く
+ */
+function handleLogin() {
+  const webAppUrl = CONFIG.WEB_APP_URL || 'http://localhost:8080';
+  // WebアプリのURLを新しいタブで開く
+  chrome.tabs.create({ url: webAppUrl });
+  window.close();
 }
 
 /**
@@ -134,6 +232,9 @@ function showState(state) {
   elements.error.classList.add('hidden');
   elements.form.classList.add('hidden');
   elements.success.classList.add('hidden');
+  if (elements.loginRequired) {
+    elements.loginRequired.classList.add('hidden');
+  }
 
   switch (state) {
     case 'loading':
@@ -147,6 +248,15 @@ function showState(state) {
       break;
     case 'success':
       elements.success.classList.remove('hidden');
+      break;
+    case 'login-required':
+      if (elements.loginRequired) {
+        elements.loginRequired.classList.remove('hidden');
+      } else {
+        // フォールバック: エラー表示
+        elements.errorMessage.textContent = 'ログインが必要です。Webアプリでログインしてからもう一度お試しください。';
+        elements.error.classList.remove('hidden');
+      }
       break;
   }
 }
@@ -259,8 +369,8 @@ function extractPageContent() {
   const clone = targetElement.cloneNode(true);
 
   for (const selector of excludeSelectors) {
-    const elements = clone.querySelectorAll(selector);
-    elements.forEach(el => el.remove());
+    const elementsToRemove = clone.querySelectorAll(selector);
+    elementsToRemove.forEach(el => el.remove());
   }
 
   // テキストを抽出
@@ -286,13 +396,14 @@ function extractPageContent() {
  * APIを呼び出して仮説ドラフトを生成
  */
 async function generateHypothesisDraft(pageData) {
-  const settings = {
-    apiUrl: elements.apiUrlInput.value.trim() || DEFAULT_SETTINGS.apiUrl,
-    userId: elements.userIdInput.value.trim() || DEFAULT_SETTINGS.userId
-  };
+  const apiUrl = elements.apiUrlInput.value.trim() || CONFIG.API_URL;
+  const userId = authenticatedUserId || elements.userIdInput.value.trim() || 'extension-user';
 
-  const response = await fetch(`${settings.apiUrl}/api/v1/hypothesis/draft`, {
+  debugLog('Generating hypothesis draft for:', pageData.title);
+
+  const response = await fetch(`${apiUrl}/api/v1/hypothesis/draft`, {
     method: 'POST',
+    credentials: 'include',  // セッションCookieを送信
     headers: {
       'Content-Type': 'application/json'
     },
@@ -300,7 +411,7 @@ async function generateHypothesisDraft(pageData) {
       url: pageData.url,
       title: pageData.title,
       content: pageData.content,
-      user_id: settings.userId
+      user_id: userId
     })
   });
 
@@ -359,10 +470,8 @@ async function handleFormSubmit(event) {
   submitBtn.textContent = '保存中...';
 
   try {
-    const settings = {
-      apiUrl: elements.apiUrlInput.value.trim() || DEFAULT_SETTINGS.apiUrl,
-      userId: elements.userIdInput.value.trim() || DEFAULT_SETTINGS.userId
-    };
+    const apiUrl = elements.apiUrlInput.value.trim() || CONFIG.API_URL;
+    const userId = authenticatedUserId || elements.userIdInput.value.trim() || 'extension-user';
 
     // タグを配列に変換
     const tagsInput = elements.tags.value.trim();
@@ -370,14 +479,15 @@ async function handleFormSubmit(event) {
       ? tagsInput.split(',').map(t => t.trim()).filter(t => t.length > 0)
       : [];
 
-    // 仮説を保存
-    const response = await fetch(`${settings.apiUrl}/api/v1/team-brain/hypotheses/incubate`, {
+    // 仮説を保存（セッションCookieを含める）
+    const response = await fetch(`${apiUrl}/api/v1/team-brain/hypotheses/incubate`, {
       method: 'POST',
+      credentials: 'include',  // セッションCookieを送信
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        user_id: settings.userId,
+        user_id: userId,
         experience: `【URL】${currentPageData.url}\n【タイトル】${currentPageData.title}\n\n【仮説】\n${elements.statement.value}\n\n【背景・文脈】\n${elements.context.value}\n\n【成立条件】\n${elements.conditions.value}`,
         auto_score: true,
         check_sharing: false

@@ -21,6 +21,7 @@ const FILES_TO_INCLUDE = [
   'src/content.js',
   'src/background.js',
   'src/styles.css',
+  'src/config.js',
   'icons/icon16.png',
   'icons/icon48.png',
   'icons/icon128.png'

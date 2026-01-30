@@ -17,9 +17,15 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      # Chrome Extension configuration
+      - API_PUBLIC_URL=${API_PUBLIC_URL:-http://localhost:8086}
+      - WEB_APP_URL=${WEB_APP_URL:-http://localhost:8080}
+      - LINE_CHANNEL_ID=${LINE_CHANNEL_ID}
     volumes:
       - ./services/backend/src:/app
       - ./topic-service:/app/topic-service
+      # Chrome Extension source for dynamic ZIP generation
+      - ./extension:/app/extension:ro
     networks:
       - app-network
 

@@ -812,38 +812,43 @@ async def get_user_contents(user_id: str = Query(..., description="User ID")):
 
 
 # =============================================================================
-# Chrome Extension - Hypothesis Draft API
+# Chrome Extension - Dynamic ZIP Generation & Session API
 # =============================================================================
 
 from pathlib import Path
 from langchain_core.prompts import PromptTemplate
 from config import MODEL_HYPOTHESIS_GENERATION
+import zipfile
+import tempfile
+import shutil
 
 
-# Chrome拡張ダウンロードエンドポイント
-# Docker環境と開発環境の両方に対応するパス解決
-def _get_extension_zip_path() -> Optional[Path]:
-    """拡張機能のzipファイルパスを取得（環境変数または自動検出）"""
+def _get_extension_source_path() -> Optional[Path]:
+    """拡張機能のソースディレクトリまたはベースZIPを取得"""
     # 環境変数で明示的に指定されている場合
-    env_path = os.environ.get("EXTENSION_ZIP_PATH")
+    env_path = os.environ.get("EXTENSION_SOURCE_PATH")
     if env_path:
         return Path(env_path)
 
     # 開発環境: main.pyから相対パスで辿る
     try:
         current_file = Path(__file__).resolve()
-        # services/backend/src/app/api/main.py -> プロジェクトルート
         for i in range(len(current_file.parents)):
-            candidate = current_file.parents[i] / "extension/team-brain-extension.zip"
-            if candidate.exists():
-                return candidate
+            # ソースディレクトリを優先
+            src_candidate = current_file.parents[i] / "extension/src"
+            if src_candidate.exists():
+                return current_file.parents[i] / "extension"
+            # ビルド済みZIPも確認
+            zip_candidate = current_file.parents[i] / "extension/team-brain-extension.zip"
+            if zip_candidate.exists():
+                return zip_candidate
     except (IndexError, Exception):
         pass
 
-    # Docker環境: マウントされた固定パスをチェック
+    # Docker環境
     docker_paths = [
-        Path("/app/extension/team-brain-extension.zip"),
-        Path("/extension/team-brain-extension.zip"),
+        Path("/app/static/extension"),
+        Path("/app/extension"),
     ]
     for p in docker_paths:
         if p.exists():
@@ -852,24 +857,123 @@ def _get_extension_zip_path() -> Optional[Path]:
     return None
 
 
-EXTENSION_ZIP_PATH = _get_extension_zip_path()
+EXTENSION_SOURCE_PATH = _get_extension_source_path()
+
+
+def _generate_dynamic_config_js(api_url: str, web_app_url: str, line_channel_id: str) -> str:
+    """動的にconfig.jsを生成"""
+    return f'''/**
+ * Team Brain Extension - Configuration
+ * このファイルはBackendの動的ZIP生成時に自動生成されました。
+ */
+
+const TEAM_BRAIN_CONFIG = {{
+  API_URL: '{api_url}',
+  LINE_CHANNEL_ID: '{line_channel_id}',
+  WEB_APP_URL: '{web_app_url}',
+  VERSION: '1.0.0',
+  DEBUG: false
+}};
+
+if (typeof window !== 'undefined') {{
+  window.TEAM_BRAIN_CONFIG = TEAM_BRAIN_CONFIG;
+}}
+'''
+
+
+def _create_dynamic_extension_zip() -> Optional[bytes]:
+    """動的に設定を注入した拡張機能ZIPを生成"""
+    if EXTENSION_SOURCE_PATH is None:
+        return None
+
+    # 環境変数から設定を取得
+    api_url = os.environ.get("API_PUBLIC_URL", "http://localhost:8086")
+    web_app_url = os.environ.get("WEB_APP_URL", "http://localhost:8080")
+    line_channel_id = os.environ.get("LINE_CHANNEL_ID", "")
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            output_zip_path = temp_path / "extension.zip"
+
+            if EXTENSION_SOURCE_PATH.is_file() and EXTENSION_SOURCE_PATH.suffix == '.zip':
+                # ベースZIPを展開して設定を注入
+                extract_path = temp_path / "extracted"
+                with zipfile.ZipFile(EXTENSION_SOURCE_PATH, 'r') as zip_ref:
+                    zip_ref.extractall(extract_path)
+
+                # config.jsを上書き
+                config_path = extract_path / "src" / "config.js"
+                config_path.write_text(_generate_dynamic_config_js(api_url, web_app_url, line_channel_id))
+
+                # 再圧縮
+                with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for file_path in extract_path.rglob('*'):
+                        if file_path.is_file():
+                            arcname = file_path.relative_to(extract_path)
+                            zipf.write(file_path, arcname)
+
+            elif EXTENSION_SOURCE_PATH.is_dir():
+                # ソースディレクトリから直接ZIPを生成
+                with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    # manifest.json
+                    manifest_path = EXTENSION_SOURCE_PATH / "manifest.json"
+                    if manifest_path.exists():
+                        zipf.write(manifest_path, "manifest.json")
+
+                    # src/ディレクトリ
+                    src_dir = EXTENSION_SOURCE_PATH / "src"
+                    if src_dir.exists():
+                        for file_path in src_dir.rglob('*'):
+                            if file_path.is_file():
+                                arcname = "src" / file_path.relative_to(src_dir)
+                                # config.jsは動的に生成
+                                if file_path.name == "config.js":
+                                    zipf.writestr(str(arcname), _generate_dynamic_config_js(api_url, web_app_url, line_channel_id))
+                                else:
+                                    zipf.write(file_path, arcname)
+
+                    # icons/ディレクトリ
+                    icons_dir = EXTENSION_SOURCE_PATH / "icons"
+                    if icons_dir.exists():
+                        for file_path in icons_dir.rglob('*'):
+                            if file_path.is_file() and file_path.suffix == '.png':
+                                arcname = "icons" / file_path.relative_to(icons_dir)
+                                zipf.write(file_path, arcname)
+            else:
+                return None
+
+            # ZIPファイルの内容を読み取って返す
+            return output_zip_path.read_bytes()
+
+    except Exception as e:
+        logger.error(f"Failed to create dynamic extension ZIP: {e}")
+        return None
 
 
 @app.get("/api/v1/extension/download")
 async def download_extension():
     """
-    ビルド済みのChrome拡張をダウンロードする。
+    動的に設定を注入したChrome拡張をダウンロードする。
+    環境変数から API_PUBLIC_URL, WEB_APP_URL, LINE_CHANNEL_ID を読み取り、
+    config.js に埋め込んだZIPを生成して返す。
     """
-    if EXTENSION_ZIP_PATH is None or not EXTENSION_ZIP_PATH.exists():
+    zip_content = _create_dynamic_extension_zip()
+
+    if zip_content is None:
         raise HTTPException(
             status_code=404,
-            detail="拡張機能がまだビルドされていません。'npm run build:extension' を実行してください。"
+            detail="拡張機能のソースが見つかりません。"
         )
 
-    return FileResponse(
-        path=str(EXTENSION_ZIP_PATH),
-        filename="team-brain-extension.zip",
-        media_type="application/zip"
+    # StreamingResponseでバイナリを返す
+    from fastapi.responses import Response
+    return Response(
+        content=zip_content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": "attachment; filename=team-brain-extension.zip"
+        }
     )
 
 
@@ -878,7 +982,7 @@ async def get_extension_info():
     """
     Chrome拡張の情報とインストール手順を取得する。
     """
-    is_available = EXTENSION_ZIP_PATH is not None and EXTENSION_ZIP_PATH.exists()
+    is_available = EXTENSION_SOURCE_PATH is not None
 
     return {
         "available": is_available,
@@ -893,6 +997,28 @@ async def get_extension_info():
             "6. 展開したフォルダを選択してインストール完了"
         ]
     }
+
+
+@app.get("/api/v1/auth/session")
+async def check_session(request: Request):
+    """
+    セッションの認証状態を確認する。
+    Chrome拡張からセッションCookieを使って認証状態を確認するためのエンドポイント。
+    """
+    # セッションCookieからユーザーIDを取得
+    # 注: 実際の実装はセッション管理方式に依存
+    session_id = request.cookies.get("session_id")
+    user_id = request.cookies.get("user_id")
+
+    if user_id:
+        return {"authenticated": True, "user_id": user_id}
+
+    if session_id:
+        # セッションIDからユーザー情報を取得（実装は省略）
+        # ここではセッションIDがあれば認証済みとみなす
+        return {"authenticated": True, "user_id": session_id}
+
+    return {"authenticated": False, "user_id": None}
 
 
 @app.post("/api/v1/hypothesis/draft")

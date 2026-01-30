@@ -5,20 +5,60 @@
  * - コンテキストメニューの管理
  * - タブ間のメッセージング
  * - ストレージの初期化
+ *
+ * 認証: WebアプリのセッションCookieを共有して認証します。
  */
+
+// 注意: Service Worker では importScripts を使用してconfig.jsを読み込む
+// ただし、Manifest V3ではES modulesが推奨されていないため、
+// 設定はchrome.storage経由で管理します。
+
+// デフォルト設定（config.jsで上書きされる想定）
+const DEFAULT_CONFIG = {
+  API_URL: 'http://localhost:8086',
+  WEB_APP_URL: 'http://localhost:8080',
+  LINE_CHANNEL_ID: '',
+  DEBUG: true
+};
+
+/**
+ * デバッグログ
+ */
+function debugLog(...args) {
+  console.log('[Team Brain]', ...args);
+}
+
+/**
+ * 設定を取得
+ */
+async function getConfig() {
+  try {
+    const stored = await chrome.storage.local.get(['apiUrl', 'webAppUrl', 'lineChannelId']);
+    return {
+      API_URL: stored.apiUrl || DEFAULT_CONFIG.API_URL,
+      WEB_APP_URL: stored.webAppUrl || DEFAULT_CONFIG.WEB_APP_URL,
+      LINE_CHANNEL_ID: stored.lineChannelId || DEFAULT_CONFIG.LINE_CHANNEL_ID
+    };
+  } catch (error) {
+    debugLog('Failed to get config:', error);
+    return DEFAULT_CONFIG;
+  }
+}
 
 // 拡張機能インストール時の初期化
 chrome.runtime.onInstalled.addListener(async (details) => {
-  console.log('[Team Brain] Extension installed:', details.reason);
+  debugLog('Extension installed:', details.reason);
 
-  // デフォルト設定を初期化
-  const existingSettings = await chrome.storage.local.get(['apiUrl', 'userId']);
+  // デフォルト設定を初期化（既存の設定がない場合のみ）
+  const existingSettings = await chrome.storage.local.get(['apiUrl', 'webAppUrl']);
 
   if (!existingSettings.apiUrl) {
     await chrome.storage.local.set({
-      apiUrl: 'http://localhost:8086',
-      userId: 'extension-user'
+      apiUrl: DEFAULT_CONFIG.API_URL,
+      webAppUrl: DEFAULT_CONFIG.WEB_APP_URL,
+      lineChannelId: DEFAULT_CONFIG.LINE_CHANNEL_ID
     });
+    debugLog('Default settings initialized');
   }
 
   // コンテキストメニューを作成
@@ -83,6 +123,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     });
     return true;
   }
+
+  if (request.action === 'getConfig') {
+    // 設定を返す
+    getConfig().then(config => sendResponse(config));
+    return true;
+  }
+
+  if (request.action === 'updateConfig') {
+    // 設定を更新
+    chrome.storage.local.set(request.config).then(() => {
+      sendResponse({ success: true });
+    }).catch(error => {
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
 });
 
 // タブ更新時の処理（オプション）
@@ -93,4 +149,4 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-console.log('[Team Brain] Background service worker started');
+debugLog('Background service worker started');
